@@ -13,8 +13,8 @@ from hummingbot.core.web_assistant.connections.data_types import RESTRequest, WS
 
 class CryptocomAuth(AuthBase):
     def __init__(self, api_key: str, secret_key: str, time_provider: TimeSynchronizer):
-        self.api_key = api_key
-        self.secret_key = secret_key
+        self.api_key = (api_key or "").strip()
+        self.secret_key = (secret_key or "").strip()
         self.time_provider = time_provider
 
     async def rest_authenticate(self, request: RESTRequest) -> RESTRequest:
@@ -54,7 +54,10 @@ class CryptocomAuth(AuthBase):
         if not method and request_url:
             parsed_path = urlparse(request_url).path
             method = parsed_path.lstrip("/")
-            request_data["method"] = method
+        method = str(method or "").lstrip("/")
+        if method.startswith("exchange/v1/"):
+            method = method[len("exchange/v1/"):]
+        request_data["method"] = method
 
         request_id = int(request_data.get("id") or self._nonce())
         request_data["id"] = request_id
