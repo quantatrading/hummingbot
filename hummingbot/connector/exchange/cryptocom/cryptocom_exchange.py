@@ -452,16 +452,23 @@ class CryptocomExchange(ExchangePyBase):
                 path_url=CONSTANTS.ACCOUNTS_PATH_URL,
                 params={},
             )
-        except Exception:
+        except Exception as primary_exception:
             # Some accounts still expose the legacy balance endpoint.
             self.logger().debug(
                 f"Primary balance endpoint {CONSTANTS.ACCOUNTS_PATH_URL} failed. Falling back to {CONSTANTS.ACCOUNTS_LEGACY_PATH_URL}.",
                 exc_info=True,
             )
-            balances_result = await self._api_private_post(
-                path_url=CONSTANTS.ACCOUNTS_LEGACY_PATH_URL,
-                params={},
-            )
+            try:
+                balances_result = await self._api_private_post(
+                    path_url=CONSTANTS.ACCOUNTS_LEGACY_PATH_URL,
+                    params={},
+                )
+            except Exception as fallback_exception:
+                raise IOError(
+                    f"Balance auth failed on both endpoints: "
+                    f"{CONSTANTS.ACCOUNTS_PATH_URL} -> {primary_exception}; "
+                    f"{CONSTANTS.ACCOUNTS_LEGACY_PATH_URL} -> {fallback_exception}"
+                )
 
         # Spot v2.1-style payload
         balances = balances_result.get("accounts") or []
