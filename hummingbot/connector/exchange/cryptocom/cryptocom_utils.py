@@ -16,11 +16,12 @@ DEFAULT_FEES = TradeFeeSchema(
 
 
 def is_exchange_information_valid(exchange_info: Dict[str, Any]) -> bool:
-    instrument_type = str(exchange_info.get("instrument_type", "")).upper()
+    instrument_type = str(exchange_info.get("instrument_type") or exchange_info.get("inst_type") or "").upper()
     state = str(exchange_info.get("state", "")).upper()
     tradable = exchange_info.get("tradable", True)
 
-    return instrument_type == "SPOT" and state not in {"INACTIVE", "DISABLED"} and bool(tradable)
+    is_spot = instrument_type in {"SPOT", "CCY_PAIR"}
+    return is_spot and state not in {"INACTIVE", "DISABLED"} and bool(tradable)
 
 
 class CryptocomConfigMap(BaseConnectorConfigMap):

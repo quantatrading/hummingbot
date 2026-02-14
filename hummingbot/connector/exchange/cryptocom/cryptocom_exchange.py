@@ -228,11 +228,13 @@ class CryptocomExchange(ExchangePyBase):
         return False
 
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
-        trading_pair_rules = self._extract_result(exchange_info_dict).get("instruments", [])
+        result = self._extract_result(exchange_info_dict)
+        trading_pair_rules = result.get("instruments", []) or result.get("data", [])
         retval = []
         for rule in filter(cryptocom_utils.is_exchange_information_valid, trading_pair_rules):
             try:
-                trading_pair = await self.trading_pair_associated_to_exchange_symbol(symbol=rule.get("instrument_name"))
+                exchange_symbol = rule.get("instrument_name") or rule.get("symbol")
+                trading_pair = await self.trading_pair_associated_to_exchange_symbol(symbol=exchange_symbol)
 
                 min_order_size = Decimal(str(rule.get("min_quantity", rule.get("qty_tick_size", "0"))))
                 tick_size = Decimal(str(rule.get("price_tick_size", "0.00000001")))
@@ -499,14 +501,15 @@ class CryptocomExchange(ExchangePyBase):
 
     def _initialize_trading_pair_symbols_from_exchange_info(self, exchange_info: Dict[str, Any]):
         mapping = bidict()
-        instruments = self._extract_result(exchange_info).get("instruments", [])
+        result = self._extract_result(exchange_info)
+        instruments = result.get("instruments", []) or result.get("data", [])
 
         for symbol_data in filter(cryptocom_utils.is_exchange_information_valid, instruments):
-            exchange_symbol = symbol_data.get("instrument_name")
+            exchange_symbol = symbol_data.get("instrument_name") or symbol_data.get("symbol")
             if not exchange_symbol:
                 continue
-            base = str(symbol_data.get("base_currency") or "").upper()
-            quote = str(symbol_data.get("quote_currency") or "").upper()
+            base = str(symbol_data.get("base_currency") or symbol_data.get("base_ccy") or "").upper()
+            quote = str(symbol_data.get("quote_currency") or symbol_data.get("quote_ccy") or "").upper()
             if not base or not quote:
                 continue
             mapping[exchange_symbol] = combine_to_hb_trading_pair(base=base, quote=quote)
