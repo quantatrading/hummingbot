@@ -445,10 +445,21 @@ class CryptocomExchange(ExchangePyBase):
         local_asset_names = set(self._account_balances.keys())
         remote_asset_names = set()
 
-        balances_result = await self._api_private_post(
-            path_url=CONSTANTS.ACCOUNTS_PATH_URL,
-            params={},
-        )
+        try:
+            balances_result = await self._api_private_post(
+                path_url=CONSTANTS.ACCOUNTS_PATH_URL,
+                params={},
+            )
+        except Exception:
+            # Some accounts still expose the legacy balance endpoint.
+            self.logger().debug(
+                f"Primary balance endpoint {CONSTANTS.ACCOUNTS_PATH_URL} failed. Falling back to {CONSTANTS.ACCOUNTS_LEGACY_PATH_URL}.",
+                exc_info=True,
+            )
+            balances_result = await self._api_private_post(
+                path_url=CONSTANTS.ACCOUNTS_LEGACY_PATH_URL,
+                params={},
+            )
 
         # Spot v2.1-style payload
         balances = balances_result.get("accounts") or []

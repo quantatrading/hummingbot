@@ -23,6 +23,7 @@ TRADES_PATH_URL = "/public/get-trades"
 
 # Private API endpoints
 ACCOUNTS_PATH_URL = "/private/user-balance"
+ACCOUNTS_LEGACY_PATH_URL = "/private/get-account-summary"
 MY_TRADES_PATH_URL = "/private/get-trades"
 ORDER_PATH_URL = "/private/create-order"
 CANCEL_ORDER_PATH_URL = "/private/cancel-order"
@@ -71,6 +72,8 @@ RATE_LIMITS = [
     RateLimit(limit_id=TRADES_PATH_URL, limit=100, time_interval=SECOND,
               linked_limits=[LinkedLimitWeightPair(REQUEST_WEIGHT)]),
     RateLimit(limit_id=ACCOUNTS_PATH_URL, limit=100, time_interval=SECOND,
+              linked_limits=[LinkedLimitWeightPair(REQUEST_WEIGHT)]),
+    RateLimit(limit_id=ACCOUNTS_LEGACY_PATH_URL, limit=100, time_interval=SECOND,
               linked_limits=[LinkedLimitWeightPair(REQUEST_WEIGHT)]),
     RateLimit(limit_id=MY_TRADES_PATH_URL, limit=100, time_interval=SECOND,
               linked_limits=[LinkedLimitWeightPair(REQUEST_WEIGHT)]),
