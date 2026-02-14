@@ -1,3 +1,4 @@
+import time
 from typing import Callable, Optional
 
 import hummingbot.connector.exchange.cryptocom.cryptocom_constants as CONSTANTS
@@ -50,18 +51,8 @@ async def get_current_server_time(
         throttler: Optional[AsyncThrottler] = None,
         domain: str = CONSTANTS.DEFAULT_DOMAIN,
 ) -> float:
-    throttler = throttler or create_throttler()
-    api_factory = build_api_factory_without_time_synchronizer_pre_processor(throttler=throttler)
-    rest_assistant = await api_factory.get_rest_assistant()
-    response = await rest_assistant.execute_request(
-        url=public_rest_url(path_url=CONSTANTS.PING_PATH_URL, domain=domain),
-        method=RESTMethod.GET,
-        throttler_limit_id=CONSTANTS.PING_PATH_URL,
-    )
-
-    result = response.get("result", {})
-    raw_server_time = result.get("server_time") or result.get("time") or 0
-    server_time = float(raw_server_time)
-    if server_time > 1e12:
-        server_time *= 1e-3
-    return server_time
+    """
+    Crypto.com Exchange v1 does not provide a dedicated public time endpoint anymore.
+    Return local epoch time to keep nonce generation and request preprocessing functional.
+    """
+    return time.time()

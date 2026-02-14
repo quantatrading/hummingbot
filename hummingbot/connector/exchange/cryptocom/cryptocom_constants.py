@@ -15,7 +15,9 @@ WSS_PRIVATE_URL = "wss://stream.crypto.com/exchange/v1/market"
 # Public API endpoints
 TICKER_BOOK_PATH_URL = "/public/get-ticker"
 EXCHANGE_INFO_PATH_URL = "/public/get-instruments"
-PING_PATH_URL = "/public/get-time"
+# Crypto.com Exchange v1 no longer exposes `public/get-time`.
+# Use a stable public endpoint for network checks.
+PING_PATH_URL = EXCHANGE_INFO_PATH_URL
 SNAPSHOT_PATH_URL = "/public/get-book"
 TRADES_PATH_URL = "/public/get-trades"
 
