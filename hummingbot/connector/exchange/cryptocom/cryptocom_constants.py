@@ -10,10 +10,10 @@ MAX_ORDER_ID_LEN = 32
 
 REST_URL = "https://api.crypto.com/exchange/v1"
 WSS_PUBLIC_URL = "wss://stream.crypto.com/exchange/v1/market"
-WSS_PRIVATE_URL = "wss://stream.crypto.com/exchange/v1/market"
+WSS_PRIVATE_URL = "wss://stream.crypto.com/exchange/v1/user"
 
 # Public API endpoints
-TICKER_BOOK_PATH_URL = "/public/get-ticker"
+TICKER_BOOK_PATH_URL = "/public/get-tickers"
 EXCHANGE_INFO_PATH_URL = "/public/get-instruments"
 # Crypto.com Exchange v1 no longer exposes `public/get-time`.
 # Use a stable public endpoint for network checks.
@@ -22,8 +22,8 @@ SNAPSHOT_PATH_URL = "/public/get-book"
 TRADES_PATH_URL = "/public/get-trades"
 
 # Private API endpoints
-ACCOUNTS_PATH_URL = "/private/get-account-summary"
-MY_TRADES_PATH_URL = "/private/get-order-detail"
+ACCOUNTS_PATH_URL = "/private/user-balance"
+MY_TRADES_PATH_URL = "/private/get-trades"
 ORDER_PATH_URL = "/private/create-order"
 CANCEL_ORDER_PATH_URL = "/private/cancel-order"
 ORDER_DETAIL_PATH_URL = "/private/get-order-detail"
@@ -36,6 +36,7 @@ SIDE_SELL = "SELL"
 TIME_IN_FORCE_GTC = "GOOD_TILL_CANCEL"
 
 ORDER_STATE = {
+    "NEW": OrderState.OPEN,
     "ACTIVE": OrderState.OPEN,
     "OPEN": OrderState.OPEN,
     "PENDING": OrderState.PENDING_CREATE,

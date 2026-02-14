@@ -273,7 +273,13 @@ class CryptocomExchange(ExchangePyBase):
                             )
                         if tracked_order is None:
                             continue
-                        order_state = CONSTANTS.ORDER_STATE.get(str(order_event.get("status", "")).upper())
+                        status = str(order_event.get("status", "")).upper()
+                        order_state = CONSTANTS.ORDER_STATE.get(status)
+                        cumulative_qty = Decimal(
+                            str(order_event.get("cumulative_quantity") or order_event.get("cum_qty") or "0")
+                        )
+                        if order_state == CONSTANTS.ORDER_STATE.get("ACTIVE") and cumulative_qty > Decimal("0"):
+                            order_state = CONSTANTS.ORDER_STATE.get("PARTIALLY_FILLED")
                         if order_state is None:
                             continue
                         timestamp = float(order_event.get("update_time") or event_message.get("nonce") or self.current_timestamp)
@@ -299,8 +305,10 @@ class CryptocomExchange(ExchangePyBase):
                             )
                         if tracked_order is None:
                             continue
-                        fee_token = str(trade_event.get("fee_currency") or tracked_order.quote_asset)
-                        fee_amount = Decimal(str(trade_event.get("fee") or "0"))
+                        fee_token = str(
+                            trade_event.get("fee_instrument_name") or trade_event.get("fee_currency") or tracked_order.quote_asset
+                        )
+                        fee_amount = abs(Decimal(str(trade_event.get("fees") or trade_event.get("fee") or "0")))
                         fill_qty = Decimal(str(trade_event.get("quantity") or trade_event.get("traded_quantity") or "0"))
                         fill_price = Decimal(str(trade_event.get("traded_price") or trade_event.get("price") or "0"))
                         trade_timestamp = float(trade_event.get("create_time") or trade_event.get("timestamp") or self.current_timestamp)
@@ -342,7 +350,14 @@ class CryptocomExchange(ExchangePyBase):
                                 continue
                             total_balance = Decimal(str(position.get("quantity") or position.get("balance") or "0"))
                             reserved = Decimal(str(position.get("reserved_qty") or position.get("order") or "0"))
-                            free_balance = Decimal(str(position.get("available") or position.get("available_balance") or (total_balance - reserved)))
+                            free_balance = Decimal(
+                                str(
+                                    position.get("max_withdrawal_balance")
+                                    or position.get("available")
+                                    or position.get("available_balance")
+                                    or (total_balance - reserved)
+                                )
+                            )
                             self._account_available_balances[asset_name] = free_balance
                             self._account_balances[asset_name] = total_balance
 
@@ -359,17 +374,23 @@ class CryptocomExchange(ExchangePyBase):
 
         symbol = await self.exchange_symbol_associated_to_pair(trading_pair=order.trading_pair)
         fills_result = await self._api_private_post(
-            path_url=CONSTANTS.ORDER_DETAIL_PATH_URL,
+            path_url=CONSTANTS.MY_TRADES_PATH_URL,
             params={
                 "instrument_name": symbol,
-                "order_id": order.exchange_order_id,
+                "count": 200,
             },
         )
 
-        trades = fills_result.get("trades") or []
+        trades = fills_result.get("data") or fills_result.get("trades") or []
         for trade in trades:
-            fee_token = str(trade.get("fee_currency") or order.quote_asset)
-            fee_amount = Decimal(str(trade.get("fee") or "0"))
+            trade_order_id = str(trade.get("order_id") or "")
+            trade_client_oid = str(trade.get("client_oid") or "")
+            if trade_order_id and trade_order_id != str(order.exchange_order_id):
+                if not (trade_client_oid and trade_client_oid == order.client_order_id):
+                    continue
+
+            fee_token = str(trade.get("fee_instrument_name") or trade.get("fee_currency") or order.quote_asset)
+            fee_amount = abs(Decimal(str(trade.get("fees") or trade.get("fee") or "0")))
             qty = Decimal(str(trade.get("quantity") or trade.get("traded_quantity") or "0"))
             price = Decimal(str(trade.get("traded_price") or trade.get("price") or "0"))
             timestamp = float(trade.get("create_time") or trade.get("timestamp") or self.current_timestamp)
@@ -449,7 +470,14 @@ class CryptocomExchange(ExchangePyBase):
                     continue
                 total_balance = Decimal(str(position.get("quantity") or position.get("balance") or "0"))
                 reserved = Decimal(str(position.get("reserved_qty") or position.get("order") or "0"))
-                free_balance = Decimal(str(position.get("available") or position.get("available_balance") or (total_balance - reserved)))
+                free_balance = Decimal(
+                    str(
+                        position.get("max_withdrawal_balance")
+                        or position.get("available")
+                        or position.get("available_balance")
+                        or (total_balance - reserved)
+                    )
+                )
                 self._account_available_balances[asset_name] = free_balance
                 self._account_balances[asset_name] = total_balance
                 remote_asset_names.add(asset_name)
