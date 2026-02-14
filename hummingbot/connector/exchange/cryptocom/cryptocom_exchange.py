@@ -326,11 +326,25 @@ class CryptocomExchange(ExchangePyBase):
 
                 elif channel.startswith("user.balance"):
                     for balance in result.get("data", []):
-                        asset_name = str(balance.get("currency", "")).upper()
-                        free_balance = Decimal(str(balance.get("available") or "0"))
-                        total_balance = Decimal(str(balance.get("balance") or "0"))
-                        self._account_available_balances[asset_name] = free_balance
-                        self._account_balances[asset_name] = total_balance
+                        # Spot v2.1-style payload
+                        if "currency" in balance:
+                            asset_name = str(balance.get("currency", "")).upper()
+                            free_balance = Decimal(str(balance.get("available") or balance.get("available_balance") or "0"))
+                            total_balance = Decimal(str(balance.get("balance") or "0"))
+                            if asset_name:
+                                self._account_available_balances[asset_name] = free_balance
+                                self._account_balances[asset_name] = total_balance
+
+                        # Exchange v1-style payload
+                        for position in balance.get("position_balances", []) or []:
+                            asset_name = str(position.get("currency") or position.get("instrument_name") or "").upper()
+                            if not asset_name:
+                                continue
+                            total_balance = Decimal(str(position.get("quantity") or position.get("balance") or "0"))
+                            reserved = Decimal(str(position.get("reserved_qty") or position.get("order") or "0"))
+                            free_balance = Decimal(str(position.get("available") or position.get("available_balance") or (total_balance - reserved)))
+                            self._account_available_balances[asset_name] = free_balance
+                            self._account_balances[asset_name] = total_balance
 
             except asyncio.CancelledError:
                 raise
@@ -415,6 +429,7 @@ class CryptocomExchange(ExchangePyBase):
             params={},
         )
 
+        # Spot v2.1-style payload
         balances = balances_result.get("accounts") or []
         for balance_entry in balances:
             asset_name = str(balance_entry.get("currency", "")).upper()
@@ -425,6 +440,19 @@ class CryptocomExchange(ExchangePyBase):
             self._account_available_balances[asset_name] = free_balance
             self._account_balances[asset_name] = total_balance
             remote_asset_names.add(asset_name)
+
+        # Exchange v1-style payload
+        for account_entry in balances_result.get("data", []) or []:
+            for position in account_entry.get("position_balances", []) or []:
+                asset_name = str(position.get("currency") or position.get("instrument_name") or "").upper()
+                if not asset_name:
+                    continue
+                total_balance = Decimal(str(position.get("quantity") or position.get("balance") or "0"))
+                reserved = Decimal(str(position.get("reserved_qty") or position.get("order") or "0"))
+                free_balance = Decimal(str(position.get("available") or position.get("available_balance") or (total_balance - reserved)))
+                self._account_available_balances[asset_name] = free_balance
+                self._account_balances[asset_name] = total_balance
+                remote_asset_names.add(asset_name)
 
         for asset_name in local_asset_names.difference(remote_asset_names):
             del self._account_available_balances[asset_name]
