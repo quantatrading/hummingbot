@@ -182,3 +182,57 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
     async def _process_message_for_unknown_channel(self, event_message: Dict[str, Any], websocket_assistant: WSAssistant):
         if event_message.get("method") == "public/heartbeat":
             await websocket_assistant.send(WSJSONRequest(payload={"id": event_message.get("id"), "method": "public/respond-heartbeat"}))
+
+    async def subscribe_to_trading_pair(self, trading_pair: str) -> bool:
+        if self._ws_assistant is None:
+            self.logger().warning(f"Cannot subscribe to {trading_pair}: WebSocket not connected")
+            return False
+
+        try:
+            symbol = await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
+            payload = {
+                "id": int(time.time() * 1e3),
+                "method": "subscribe",
+                "params": {
+                    "channels": [
+                        f"trade.{symbol}",
+                        f"book.{symbol}.150",
+                    ]
+                },
+            }
+            await self._ws_assistant.send(WSJSONRequest(payload=payload))
+            self.add_trading_pair(trading_pair)
+            self.logger().info(f"Subscribed to {trading_pair} order book and trade channels")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger().exception(f"Unexpected error subscribing to {trading_pair} channels")
+            return False
+
+    async def unsubscribe_from_trading_pair(self, trading_pair: str) -> bool:
+        if self._ws_assistant is None:
+            self.logger().warning(f"Cannot unsubscribe from {trading_pair}: WebSocket not connected")
+            return False
+
+        try:
+            symbol = await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
+            payload = {
+                "id": int(time.time() * 1e3),
+                "method": "unsubscribe",
+                "params": {
+                    "channels": [
+                        f"trade.{symbol}",
+                        f"book.{symbol}.150",
+                    ]
+                },
+            }
+            await self._ws_assistant.send(WSJSONRequest(payload=payload))
+            self.remove_trading_pair(trading_pair)
+            self.logger().info(f"Unsubscribed from {trading_pair} order book and trade channels")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger().exception(f"Unexpected error unsubscribing from {trading_pair} channels")
+            return False
