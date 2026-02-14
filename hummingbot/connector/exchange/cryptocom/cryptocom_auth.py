@@ -12,6 +12,10 @@ from hummingbot.core.web_assistant.connections.data_types import RESTRequest, WS
 
 
 class CryptocomAuth(AuthBase):
+    # Per Crypto.com docs, if INVALID_NONCE persists, using a nonce slightly in the past can help
+    # as long as it remains within the 60s tolerance window.
+    NONCE_PAST_OFFSET_SECONDS = 5
+
     def __init__(self, api_key: str, secret_key: str, time_provider: TimeSynchronizer):
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
@@ -47,7 +51,7 @@ class CryptocomAuth(AuthBase):
 
     def _nonce(self) -> int:
         # Crypto.com expects nonce as current UTC Unix timestamp in milliseconds.
-        candidate = int(self.time_provider.time() * 1e3)
+        candidate = int((self.time_provider.time() - self.NONCE_PAST_OFFSET_SECONDS) * 1e3)
         if candidate <= self._last_nonce:
             candidate = self._last_nonce + 1
         self._last_nonce = candidate
