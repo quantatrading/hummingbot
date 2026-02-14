@@ -16,6 +16,7 @@ class CryptocomAuth(AuthBase):
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
         self.time_provider = time_provider
+        self._last_nonce = 0
 
     async def rest_authenticate(self, request: RESTRequest) -> RESTRequest:
         payload = json.loads(request.data) if request.data else {}
@@ -45,7 +46,12 @@ class CryptocomAuth(AuthBase):
         return {"Content-Type": "application/json"}
 
     def _nonce(self) -> int:
-        return int(self.time_provider.time() * 1e3)
+        # Crypto.com requires a strictly increasing nonce. Use microseconds and enforce monotonicity.
+        candidate = int(self.time_provider.time() * 1e6)
+        if candidate <= self._last_nonce:
+            candidate = self._last_nonce + 1
+        self._last_nonce = candidate
+        return candidate
 
     def _sign_payload(self, payload: Dict[str, Any], request_url: str = "") -> Dict[str, Any]:
         request_data = OrderedDict(payload)
