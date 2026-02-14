@@ -101,7 +101,8 @@ class CryptocomExchange(ExchangePyBase):
 
     @property
     def is_cancel_request_in_exchange_synchronous(self) -> bool:
-        return True
+        # Crypto.com cancel endpoint accepts request first and final state arrives via user stream/status polling.
+        return False
 
     @property
     def is_trading_required(self) -> bool:
@@ -222,9 +223,9 @@ class CryptocomExchange(ExchangePyBase):
         }
         cancel_result = await self._api_private_post(path_url=CONSTANTS.CANCEL_ORDER_PATH_URL, params=params)
         status = str(cancel_result.get("status") or "").upper()
-        if status in {"CANCELED", "CANCELLED", "CANCELED_BY_USER"}:
+        if status in {"PENDING_CANCEL", "CANCELED", "CANCELLED", "CANCELED_BY_USER"}:
             return True
-        return bool(cancel_result)
+        return False
 
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
         trading_pair_rules = self._extract_result(exchange_info_dict).get("instruments", [])
@@ -264,7 +265,12 @@ class CryptocomExchange(ExchangePyBase):
                 if channel.startswith("user.order"):
                     for order_event in result.get("data", []):
                         client_order_id = str(order_event.get("client_oid") or order_event.get("client_order_id") or "")
+                        exchange_order_id = str(order_event.get("order_id") or "")
                         tracked_order = self._order_tracker.all_updatable_orders.get(client_order_id)
+                        if tracked_order is None and exchange_order_id:
+                            tracked_order = self._order_tracker.all_updatable_orders_by_exchange_order_id.get(
+                                exchange_order_id
+                            )
                         if tracked_order is None:
                             continue
                         order_state = CONSTANTS.ORDER_STATE.get(str(order_event.get("status", "")).upper())
@@ -277,15 +283,20 @@ class CryptocomExchange(ExchangePyBase):
                             trading_pair=tracked_order.trading_pair,
                             update_timestamp=timestamp,
                             new_state=order_state,
-                            client_order_id=client_order_id,
-                            exchange_order_id=str(order_event.get("order_id") or tracked_order.exchange_order_id),
+                            client_order_id=tracked_order.client_order_id,
+                            exchange_order_id=str(exchange_order_id or tracked_order.exchange_order_id),
                         )
                         self._order_tracker.process_order_update(order_update=order_update)
 
                 elif channel.startswith("user.trade"):
                     for trade_event in result.get("data", []):
                         client_order_id = str(trade_event.get("client_oid") or trade_event.get("client_order_id") or "")
+                        exchange_order_id = str(trade_event.get("order_id") or "")
                         tracked_order = self._order_tracker.all_fillable_orders.get(client_order_id)
+                        if tracked_order is None and exchange_order_id:
+                            tracked_order = self._order_tracker.all_fillable_orders_by_exchange_order_id.get(
+                                exchange_order_id
+                            )
                         if tracked_order is None:
                             continue
                         fee_token = str(trade_event.get("fee_currency") or tracked_order.quote_asset)
@@ -297,8 +308,8 @@ class CryptocomExchange(ExchangePyBase):
                             trade_timestamp *= 1e-3
                         trade_update = TradeUpdate(
                             trade_id=str(trade_event.get("trade_id") or trade_event.get("id") or trade_timestamp),
-                            client_order_id=client_order_id,
-                            exchange_order_id=str(trade_event.get("order_id") or tracked_order.exchange_order_id),
+                            client_order_id=tracked_order.client_order_id,
+                            exchange_order_id=str(exchange_order_id or tracked_order.exchange_order_id),
                             trading_pair=tracked_order.trading_pair,
                             fee=TradeFeeBase.new_spot_fee(
                                 fee_schema=self.trade_fee_schema(),
