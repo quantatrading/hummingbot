@@ -46,9 +46,8 @@ class CryptocomAuth(AuthBase):
         return {"Content-Type": "application/json"}
 
     def _nonce(self) -> int:
-        # Crypto.com requires a strictly increasing nonce.
-        # Use microseconds to stay ahead of previously used nonce scales for the same API key.
-        candidate = int(self.time_provider.time() * 1e6)
+        # Crypto.com expects nonce as current UTC Unix timestamp in milliseconds.
+        candidate = int(self.time_provider.time() * 1e3)
         if candidate <= self._last_nonce:
             candidate = self._last_nonce + 1
         self._last_nonce = candidate

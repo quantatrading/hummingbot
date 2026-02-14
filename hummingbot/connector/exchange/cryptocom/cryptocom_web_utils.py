@@ -1,4 +1,3 @@
-import time
 from typing import Callable, Optional
 
 import hummingbot.connector.exchange.cryptocom.cryptocom_constants as CONSTANTS
@@ -52,7 +51,28 @@ async def get_current_server_time(
         domain: str = CONSTANTS.DEFAULT_DOMAIN,
 ) -> float:
     """
-    Crypto.com Exchange v1 does not provide a dedicated public time endpoint anymore.
-    Return local epoch time to keep nonce generation and request preprocessing functional.
+    Crypto.com v1 does not expose a direct public time endpoint.
+    Use public tickers payload timestamps as a proxy for server time.
     """
-    return time.time()
+    throttler = throttler or create_throttler()
+    api_factory = build_api_factory_without_time_synchronizer_pre_processor(throttler=throttler)
+    rest_assistant = await api_factory.get_rest_assistant()
+    response = await rest_assistant.execute_request(
+        url=public_rest_url(path_url=CONSTANTS.TICKER_BOOK_PATH_URL, domain=domain),
+        method=RESTMethod.GET,
+        throttler_limit_id=CONSTANTS.TICKER_BOOK_PATH_URL,
+    )
+
+    result = response.get("result", {})
+    entries = result.get("data", []) or []
+    if len(entries) > 0:
+        raw_server_time = entries[0].get("t") or entries[0].get("time")
+        if raw_server_time is not None:
+            server_time = float(raw_server_time)
+            if server_time > 1e12:
+                server_time *= 1e-3
+            return server_time
+
+    # Fallback when ticker payload does not expose timestamp.
+    from time import time as local_time
+    return local_time()
