@@ -104,12 +104,46 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         if metadata:
             payload.update(metadata)
 
-        update_id = int(payload.get("t", int(time.time() * 1e3)))
+        update_id = int(
+            payload.get("u")
+            or payload.get("update_id")
+            or payload.get("t")
+            or int(time.time() * 1e3)
+        )
         bids = payload.get("bids") or payload.get("b") or []
         asks = payload.get("asks") or payload.get("a") or []
 
         return OrderBookMessage(
             OrderBookMessageType.SNAPSHOT,
+            {
+                "trading_pair": payload["trading_pair"],
+                "update_id": update_id,
+                "bids": bids,
+                "asks": asks,
+            },
+            timestamp=update_id * 1e-3,
+        )
+
+    def diff_message_from_exchange(
+        self,
+        msg: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> OrderBookMessage:
+        payload = dict(msg)
+        if metadata:
+            payload.update(metadata)
+
+        update_id = int(
+            payload.get("u")
+            or payload.get("update_id")
+            or payload.get("t")
+            or int(time.time() * 1e3)
+        )
+        bids = payload.get("bids") or payload.get("b") or []
+        asks = payload.get("asks") or payload.get("a") or []
+
+        return OrderBookMessage(
+            OrderBookMessageType.DIFF,
             {
                 "trading_pair": payload["trading_pair"],
                 "update_id": update_id,
@@ -167,8 +201,9 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         if len(data) == 0:
             return
 
-        snapshot_message = self.snapshot_message_from_exchange(data[0], {"trading_pair": trading_pair})
-        message_queue.put_nowait(snapshot_message)
+        for diff in data:
+            diff_message = self.diff_message_from_exchange(diff, {"trading_pair": trading_pair})
+            message_queue.put_nowait(diff_message)
 
     def _channel_originating_message(self, event_message: Dict[str, Any]) -> str:
         result = event_message.get("result", {})
