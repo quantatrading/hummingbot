@@ -310,9 +310,16 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             if "t" not in payload and "t" in item:
                 payload["t"] = item["t"]
 
-            snapshot_message = self.snapshot_message_from_exchange(payload, {"trading_pair": trading_pair})
-            self._last_book_update_id[trading_pair] = int(snapshot_message.update_id)
-            message_queue.put_nowait(snapshot_message)
+            has_bids = ("bids" in payload or "b" in payload)
+            has_asks = ("asks" in payload or "a" in payload)
+            # Partial book updates must be applied as DIFF, otherwise snapshot restore can wipe one side.
+            if item.get("update") is not None or not (has_bids and has_asks):
+                book_message = self.diff_message_from_exchange(payload, {"trading_pair": trading_pair})
+            else:
+                book_message = self.snapshot_message_from_exchange(payload, {"trading_pair": trading_pair})
+
+            self._last_book_update_id[trading_pair] = int(book_message.update_id)
+            message_queue.put_nowait(book_message)
 
     def _channel_originating_message(self, event_message: Dict[str, Any]) -> str:
         result = event_message.get("result", {})
