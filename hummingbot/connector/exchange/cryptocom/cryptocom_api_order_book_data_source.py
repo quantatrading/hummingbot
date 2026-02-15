@@ -261,7 +261,9 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         side = str(payload.get("s", "")).upper()
         trade_type = float(TradeType.BUY.value) if side == "BUY" else float(TradeType.SELL.value)
         trade_id = payload.get("d") or payload.get("id") or payload.get("t")
-        timestamp_ms = int(payload.get("t", int(time.time() * 1e3)))
+        timestamp_raw = int(payload.get("t", int(time.time())))
+        timestamp = self._normalize_timestamp(timestamp_raw)
+        timestamp_ms = int(timestamp * 1e3)
 
         return OrderBookMessage(
             OrderBookMessageType.TRADE,
@@ -273,8 +275,21 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
                 "price": payload.get("p"),
                 "amount": payload.get("q"),
             },
-            timestamp=timestamp_ms * 1e-3,
+            timestamp=timestamp,
         )
+
+    def _normalize_timestamp(self, value: int) -> float:
+        """
+        Normalize exchange timestamps that may be in seconds, milliseconds,
+        microseconds, or nanoseconds.
+        """
+        if value > 10**17:   # ns
+            return value * 1e-9
+        if value > 10**14:   # us
+            return value * 1e-6
+        if value > 10**11:   # ms
+            return value * 1e-3
+        return float(value)  # s
 
     async def _parse_trade_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
         result = raw_message.get("result", {})
