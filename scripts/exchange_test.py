@@ -265,6 +265,87 @@ class ExchangeTest(ScriptStrategyBase):
         stale_threshold = max(5, int(self.config.refresh_interval) * 3)
         return f"OK ({int(age)}s ago)" if age <= stale_threshold else f"STALE ({int(age)}s ago)"
 
+    def _is_positive_decimal(self, value: Any) -> bool:
+        try:
+            d = Decimal(str(value))
+            return d.is_finite() and d > Decimal("0")
+        except Exception:
+            return False
+
+    def _hb_contract_validation_lines(self, connector: ConnectorBase, ob: Any, parsed_trades: List[Dict[str, Any]]) -> List[str]:
+        checks: List[tuple] = []
+
+        pair_ok = "-" in self.config.trading_pair and len(self.config.trading_pair.split("-")) == 2
+        checks.append(("trading_pair format BASE-QUOTE", pair_ok))
+
+        symbol_map = getattr(connector, "_trading_pair_symbol_map", None)
+        symbol_map_ok = symbol_map is not None and self.config.trading_pair in getattr(symbol_map, "inverse", {})
+        checks.append(("symbol map contains configured trading_pair", symbol_map_ok))
+
+        ob_ok = ob is not None
+        bids_ok = ob_ok and len(list(islice(ob.bid_entries(), 1))) == 1
+        asks_ok = ob_ok and len(list(islice(ob.ask_entries(), 1))) == 1
+        snapshot_ok = ob_ok and int(getattr(ob, "snapshot_uid", 0) or 0) > 0
+        checks.append(("order_book initialized", ob_ok))
+        checks.append(("order_book has best bid", bids_ok))
+        checks.append(("order_book has best ask", asks_ok))
+        checks.append(("order_book snapshot_uid > 0", snapshot_ok))
+
+        try:
+            mid = connector.get_mid_price(self.config.trading_pair)
+            bid = connector.get_price(self.config.trading_pair, is_buy=False)
+            ask = connector.get_price(self.config.trading_pair, is_buy=True)
+            prices_ok = self._is_positive_decimal(mid) and self._is_positive_decimal(bid) and self._is_positive_decimal(ask)
+        except Exception:
+            prices_ok = False
+        checks.append(("mid/bid/ask numeric and > 0", prices_ok))
+
+        trades_ok = True
+        if len(parsed_trades) == 0:
+            trades_ok = False
+        else:
+            now_ts = float(self.current_timestamp)
+            for t in parsed_trades:
+                trade_id = str(t.get("trade_id", ""))
+                price_ok = self._is_positive_decimal(t.get("price"))
+                amount_ok = self._is_positive_decimal(t.get("amount"))
+                type_ok = str(t.get("trade_type", "")).lower() in {"buy", "sell"}
+                ts = float(t.get("timestamp", 0) or 0)
+                ts_ok = ts > 0 and abs(now_ts - ts) <= 30
+                if not (len(trade_id) > 0 and price_ok and amount_ok and type_ok and ts_ok):
+                    trades_ok = False
+                    break
+        checks.append(("public trade payload contract (id/price/amount/type/timestamp)", trades_ok))
+
+        balances = connector.get_all_balances()
+        balances_ok = True
+        for asset, total in balances.items():
+            available = connector.get_available_balance(asset)
+            try:
+                total_d = Decimal(str(total))
+                avail_d = Decimal(str(available))
+                if not (total_d.is_finite() and avail_d.is_finite() and avail_d <= total_d):
+                    balances_ok = False
+                    break
+            except Exception:
+                balances_ok = False
+                break
+        checks.append(("balances numeric and available <= total", balances_ok))
+
+        open_orders = self.get_active_orders(self.config.exchange)
+        open_orders_ok = True
+        for order in open_orders:
+            if not (getattr(order, "client_order_id", None) and getattr(order, "trading_pair", None)):
+                open_orders_ok = False
+                break
+        checks.append(("open order structure has id + trading_pair", open_orders_ok))
+
+        ok_count = sum(1 for _, ok in checks if ok)
+        lines = [f"HB Unified Contract Validation: {ok_count}/{len(checks)} checks passed"]
+        for name, ok in checks:
+            lines.append(f"  {'OK' if ok else 'FAIL'} - {name}")
+        return lines
+
     def format_status(self) -> str:
         try:
             lines: List[str] = []
@@ -301,6 +382,13 @@ class ExchangeTest(ScriptStrategyBase):
             if self._last_private_error:
                 lines.append(f"Last private error: {self._last_private_error}")
 
+            ob = connector.order_book_tracker.order_books.get(self.config.trading_pair)
+            data_source = connector.order_book_tracker.data_source
+            parsed_getter = getattr(data_source, "get_recent_parsed_trades", None)
+            parsed_trades_for_contract = parsed_getter(self.config.trading_pair, 30) if callable(parsed_getter) else []
+            lines.append("")
+            lines.extend(self._hb_contract_validation_lines(connector=connector, ob=ob, parsed_trades=parsed_trades_for_contract))
+
             if self.config.show_public_prices:
                 lines.append("")
                 lines.append("Public: Prices [WS+REST]")
@@ -312,8 +400,6 @@ class ExchangeTest(ScriptStrategyBase):
                     lines.append(f"Mid: {mid_price} | Bid: {bid} | Ask: {ask} [WS]")
                 except Exception as e:
                     lines.append(f"Price read error: {e}")
-
-            ob = connector.order_book_tracker.order_books.get(self.config.trading_pair)
 
             if self.config.show_public_trades:
                 lines.append("")
