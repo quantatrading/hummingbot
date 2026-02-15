@@ -13,11 +13,11 @@ from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 class ExchangeTestConfig(BaseClientModel):
     script_file_name: str = os.path.basename(__file__)
     exchange: str = Field(
-        "binance_paper_trade",
+        "cryptocom",
         json_schema_extra={"prompt": "Exchange connector (e.g. binance, cryptocom, bybit): ", "prompt_on_new": True},
     )
     trading_pair: str = Field(
-        "BTC-USDT",
+        "BTC-USD",
         json_schema_extra={"prompt": "Trading pair (e.g. BTC-USDT): ", "prompt_on_new": True},
     )
     refresh_interval: int = Field(
@@ -62,15 +62,17 @@ class ExchangeTest(ScriptStrategyBase):
     each section is driven by websocket state and/or REST polling.
     """
 
-    markets = {"binance_paper_trade": {"BTC-USDT"}}
+    # Safe defaults when script is started without --conf.
+    markets = {"cryptocom": {"BTC-USD"}}
 
     @classmethod
     def init_markets(cls, config: ExchangeTestConfig):
         cls.markets = {config.exchange: {config.trading_pair}}
 
-    def __init__(self, connectors: Dict[str, ConnectorBase], config: ExchangeTestConfig):
-        super().__init__(connectors, config)
-        self.config = config
+    def __init__(self, connectors: Dict[str, ConnectorBase], config: Optional[ExchangeTestConfig] = None):
+        resolved_config = config or ExchangeTestConfig()
+        super().__init__(connectors, resolved_config)
+        self.config = resolved_config
         self._next_refresh_ts: float = 0
         self._refresh_task = None
 
