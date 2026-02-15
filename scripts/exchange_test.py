@@ -389,7 +389,10 @@ class ExchangeTest(ScriptStrategyBase):
 
             if self.config.show_private_balance:
                 lines.append("")
-                lines.append("Private: Balance [REST]")
+                lines.append("Private: Balance [WS+REST CACHE]")
+                lines.append(f"Balance WS stream: {self._private_ws_status()} (last recv {self._private_ws_last_recv_age()})")
+                lines.append(f"Balance REST refresh: {self._rest_status(self._private_rest_last_ok_ts)}")
+                lines.append("Balance cache note: connector stores balances in a shared cache updated by WS events and REST polling.")
                 balances = connector.get_all_balances()
                 if len(balances) == 0:
                     lines.append("No balances loaded.")
