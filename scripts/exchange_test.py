@@ -75,12 +75,24 @@ class ExchangeTest(ScriptStrategyBase):
         self.config = resolved_config
         self._next_refresh_ts: float = 0
         self._refresh_task = None
+        self._last_not_ready_warning_ts: float = 0
 
         self._public_rest_last_ok_ts: float = 0
         self._private_rest_last_ok_ts: float = 0
         self._last_public_rest_price: Optional[float] = None
         self._last_private_error: str = ""
         self._last_public_error: str = ""
+
+    def tick(self, timestamp: float):
+        # Diagnostic scripts should keep running even if connector readiness is partial.
+        # We still log readiness gaps periodically, but do not block on them.
+        not_ready = [con for con in self.connectors.values() if not con.ready]
+        if len(not_ready) > 0 and (timestamp - self._last_not_ready_warning_ts) >= 5:
+            for con in not_ready:
+                status = getattr(con, "status_dict", {})
+                self.logger().warning(f"{con.name} is not ready. status={status}")
+            self._last_not_ready_warning_ts = timestamp
+        self.on_tick()
 
     def on_tick(self):
         if self.current_timestamp < self._next_refresh_ts:
@@ -148,6 +160,11 @@ class ExchangeTest(ScriptStrategyBase):
         lines.append(f"Pair: {self.config.trading_pair}")
         lines.append(f"Connector ready: {connector.ready}")
         lines.append(f"Refresh interval: {self.config.refresh_interval}s")
+        status = getattr(connector, "status_dict", {})
+        if len(status) > 0:
+            lines.append("Readiness detail:")
+            for key, val in status.items():
+                lines.append(f"  {key}: {val}")
 
         lines.append("")
         lines.append("Transport")
