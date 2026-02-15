@@ -95,6 +95,12 @@ class ExchangeTest(ScriptStrategyBase):
         self._last_ob_trade_price: Optional[Decimal] = None
         self._recent_public_trades = deque(maxlen=25)
         self._public_trade_seq: int = 0
+        self._last_ob_diff_uid: int = 0
+        self._order_book_ws_updates: int = 0
+        self._last_order_book_update_ts: float = 0
+        self._last_best_bid: Optional[Decimal] = None
+        self._last_best_ask: Optional[Decimal] = None
+        self._order_book_top_changes: int = 0
 
     def tick(self, timestamp: float):
         # Diagnostic scripts should keep running even if connector readiness is partial.
@@ -138,6 +144,25 @@ class ExchangeTest(ScriptStrategyBase):
             ob = connector.order_book_tracker.order_books.get(self.config.trading_pair)
             if ob is None:
                 return
+
+            diff_uid = int(getattr(ob, "last_diff_uid", 0) or 0)
+            if diff_uid > 0 and diff_uid != self._last_ob_diff_uid:
+                self._order_book_ws_updates += 1
+                self._last_order_book_update_ts = self.current_timestamp
+                self._last_ob_diff_uid = diff_uid
+
+            best_bid_row = next(ob.bid_entries(), None)
+            best_ask_row = next(ob.ask_entries(), None)
+            best_bid = Decimal(str(best_bid_row.price)) if best_bid_row is not None else None
+            best_ask = Decimal(str(best_ask_row.price)) if best_ask_row is not None else None
+            if (
+                (best_bid is not None and best_bid != self._last_best_bid)
+                or (best_ask is not None and best_ask != self._last_best_ask)
+            ):
+                self._order_book_top_changes += 1
+            self._last_best_bid = best_bid
+            self._last_best_ask = best_ask
+
             trade_price = ob.last_trade_price
             if trade_price is None:
                 return
@@ -309,6 +334,17 @@ class ExchangeTest(ScriptStrategyBase):
                 if ob is None:
                     lines.append("Order book not initialized for pair yet.")
                 else:
+                    ob_update_age = (
+                        f"{int(self.current_timestamp - self._last_order_book_update_ts)}s ago"
+                        if self._last_order_book_update_ts > 0
+                        else "n/a"
+                    )
+                    lines.append(
+                        f"OB ws updates={self._order_book_ws_updates} top_changes={self._order_book_top_changes} "
+                        f"last_diff_uid={int(getattr(ob, 'last_diff_uid', 0) or 0)} "
+                        f"snapshot_uid={int(getattr(ob, 'snapshot_uid', 0) or 0)} "
+                        f"last_update={ob_update_age}"
+                    )
                     depth = max(1, int(self.config.order_book_depth))
                     lines.append("Top bids:")
                     for row in islice(ob.bid_entries(), depth):
