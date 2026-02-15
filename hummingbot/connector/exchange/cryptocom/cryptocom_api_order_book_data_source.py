@@ -85,7 +85,8 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             channels = []
             for trading_pair in self._trading_pairs:
                 symbol = await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
-                channels.extend([f"trade.{symbol}", f"book.{symbol}.{self.WS_BOOK_DEPTH}"])
+                channels.append(f"trade.{symbol}")
+                channels.extend(self._book_channels_for_symbol(symbol))
 
             payload = {
                 "id": int(time.time() * 1e3),
@@ -209,6 +210,18 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
                     normalized.append([str(price), str(amount)])
         return normalized
 
+    def _book_channels_for_symbol(self, symbol: str) -> List[str]:
+        # Crypto.com has used multiple book channel variants over time/deployments.
+        # Subscribe to all common variants and process whichever arrives.
+        candidates = [
+            f"book.{symbol}",
+            f"book.{symbol}.50",
+            f"book.{symbol}.150",
+            f"book.{symbol}.{self.WS_BOOK_DEPTH}",
+        ]
+        # Preserve order while removing duplicates.
+        return list(dict.fromkeys(candidates))
+
     def trade_message_from_exchange(self, msg: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> OrderBookMessage:
         payload = dict(msg)
         if metadata:
@@ -298,10 +311,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
                 "id": int(time.time() * 1e3),
                 "method": "subscribe",
                 "params": {
-                    "channels": [
-                        f"trade.{symbol}",
-                        f"book.{symbol}.{self.WS_BOOK_DEPTH}",
-                    ]
+                    "channels": [f"trade.{symbol}", *self._book_channels_for_symbol(symbol)]
                 },
             }
             await self._ws_assistant.send(WSJSONRequest(payload=payload))
@@ -325,10 +335,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
                 "id": int(time.time() * 1e3),
                 "method": "unsubscribe",
                 "params": {
-                    "channels": [
-                        f"trade.{symbol}",
-                        f"book.{symbol}.{self.WS_BOOK_DEPTH}",
-                    ]
+                    "channels": [f"trade.{symbol}", *self._book_channels_for_symbol(symbol)]
                 },
             }
             await self._ws_assistant.send(WSJSONRequest(payload=payload))
