@@ -301,13 +301,13 @@ class ExchangeTest(ScriptStrategyBase):
 
             if self.config.show_public_prices:
                 lines.append("")
-                lines.append("Public: Prices")
+                lines.append("Public: Prices [WS+REST]")
                 try:
                     mid_price = connector.get_mid_price(self.config.trading_pair)
                     bid = connector.get_price(self.config.trading_pair, is_buy=False)
                     ask = connector.get_price(self.config.trading_pair, is_buy=True)
-                    lines.append(f"REST last traded: {self._last_public_rest_price}")
-                    lines.append(f"Mid: {mid_price} | Bid: {bid} | Ask: {ask}")
+                    lines.append(f"REST last traded: {self._last_public_rest_price} [REST]")
+                    lines.append(f"Mid: {mid_price} | Bid: {bid} | Ask: {ask} [WS]")
                 except Exception as e:
                     lines.append(f"Price read error: {e}")
 
@@ -315,22 +315,22 @@ class ExchangeTest(ScriptStrategyBase):
 
             if self.config.show_public_trades:
                 lines.append("")
-                lines.append("Public: Trades")
+                lines.append("Public: Trades [WS]")
                 if ob is None:
                     lines.append("Order book not initialized for pair yet.")
                 else:
-                    lines.append(f"Last trade price (from order book): {ob.last_trade_price}")
+                    lines.append(f"Last trade price (from order book): {ob.last_trade_price} [WS]")
                     if len(self._recent_public_trades) == 0:
                         lines.append("No recent trade updates captured yet.")
                     else:
                         show_n = max(1, int(self.config.public_trades_display_count))
-                        lines.append(f"Recent trades (live cache, last {show_n}):")
+                        lines.append(f"Recent trades (live cache, last {show_n}) [WS]:")
                         for t in list(self._recent_public_trades)[-show_n:]:
                             lines.append(f"  n={t['seq']} t={t['ts']} price={t['price']}")
 
             if self.config.show_public_order_book:
                 lines.append("")
-                lines.append("Public: Order Book")
+                lines.append("Public: Order Book [WS]")
                 if ob is None:
                     lines.append("Order book not initialized for pair yet.")
                 else:
@@ -355,7 +355,7 @@ class ExchangeTest(ScriptStrategyBase):
 
             if self.config.show_private_open_orders:
                 lines.append("")
-                lines.append("Private: Open Orders")
+                lines.append("Private: Open Orders [LOCAL CACHE <- WS+REST]")
                 open_orders = self.get_active_orders(self.config.exchange)
                 if len(open_orders) == 0:
                     lines.append("No active open orders.")
@@ -368,7 +368,7 @@ class ExchangeTest(ScriptStrategyBase):
 
             if self.config.show_private_order_history:
                 lines.append("")
-                lines.append("Private: Order History (local cache)")
+                lines.append("Private: Order History (local cache) [LOCAL CACHE <- WS+REST]")
                 order_tracker = getattr(connector, "_order_tracker", None)
                 if order_tracker is None:
                     lines.append("Order tracker not available.")
@@ -385,7 +385,7 @@ class ExchangeTest(ScriptStrategyBase):
 
             if self.config.show_private_balance:
                 lines.append("")
-                lines.append("Private: Balance")
+                lines.append("Private: Balance [REST]")
                 balances = connector.get_all_balances()
                 if len(balances) == 0:
                     lines.append("No balances loaded.")
