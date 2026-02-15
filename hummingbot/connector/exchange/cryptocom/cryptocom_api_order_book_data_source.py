@@ -38,6 +38,29 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
     async def get_last_traded_prices(self, trading_pairs: List[str], domain: Optional[str] = None) -> Dict[str, float]:
         return await self._connector.get_last_traded_prices(trading_pairs=trading_pairs)
 
+    async def listen_for_order_book_diffs(self, ev_loop: asyncio.AbstractEventLoop, output: asyncio.Queue):
+        """
+        Crypto.com book channel behaves as repeated full book payloads.
+        Process them through snapshot pipeline instead of diff pipeline.
+        """
+        pass
+
+    async def listen_for_order_book_snapshots(self, ev_loop: asyncio.AbstractEventLoop, output: asyncio.Queue):
+        message_queue = self._message_queue[self._diff_messages_queue_key]
+        while True:
+            try:
+                try:
+                    snapshot_event = await asyncio.wait_for(message_queue.get(), timeout=30.0)
+                    await self._parse_order_book_snapshot_message(raw_message=snapshot_event, message_queue=output)
+                except asyncio.TimeoutError:
+                    # Fallback to REST snapshot if stream stalls.
+                    await self._request_order_book_snapshots(output=output)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger().exception("Unexpected error when processing Crypto.com order book snapshots from exchange")
+                await self._sleep(1.0)
+
     async def _request_order_book_snapshot(self, trading_pair: str) -> Dict[str, Any]:
         params = {
             "instrument_name": await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair),
@@ -221,6 +244,10 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             message_queue.put_nowait(trade_message)
 
     async def _parse_order_book_diff_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
+        # Not used: Crypto.com book stream is handled as snapshots.
+        return
+
+    async def _parse_order_book_snapshot_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
         result = raw_message.get("result", {})
         channel = str(result.get("channel", ""))
         parts = channel.split(".")
@@ -233,9 +260,10 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         if len(data) == 0:
             return
 
-        for diff in data:
-            diff_message = self.diff_message_from_exchange(diff, {"trading_pair": trading_pair})
-            message_queue.put_nowait(diff_message)
+        for snapshot in data:
+            snapshot_message = self.snapshot_message_from_exchange(snapshot, {"trading_pair": trading_pair})
+            self._last_book_update_id[trading_pair] = int(snapshot_message.update_id)
+            message_queue.put_nowait(snapshot_message)
 
     def _channel_originating_message(self, event_message: Dict[str, Any]) -> str:
         result = event_message.get("result", {})
