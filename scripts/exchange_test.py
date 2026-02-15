@@ -1,4 +1,5 @@
 import os
+from collections import deque
 from decimal import Decimal
 from itertools import islice
 from typing import Any, Dict, List, Optional
@@ -83,6 +84,12 @@ class ExchangeTest(ScriptStrategyBase):
         self._last_public_rest_price: Optional[float] = None
         self._last_private_error: str = ""
         self._last_public_error: str = ""
+        self._public_ws_ticks: int = 0
+        self._private_ws_ticks: int = 0
+        self._last_public_ws_recv: float = 0
+        self._last_private_ws_recv: float = 0
+        self._last_ob_trade_price: Optional[Decimal] = None
+        self._recent_public_trades = deque(maxlen=25)
 
     def tick(self, timestamp: float):
         # Diagnostic scripts should keep running even if connector readiness is partial.
@@ -93,7 +100,53 @@ class ExchangeTest(ScriptStrategyBase):
                 status = getattr(con, "status_dict", {})
                 self.logger().warning(f"{con.name} is not ready. status={status}")
             self._last_not_ready_warning_ts = timestamp
+        self._update_ws_counters_and_trade_cache()
         self.on_tick()
+
+    def _update_ws_counters_and_trade_cache(self):
+        connector = self.connectors.get(self.config.exchange)
+        if connector is None:
+            return
+
+        # Count WS message flow by tracking last_recv_time changes.
+        try:
+            data_source = connector.order_book_tracker.data_source
+            ws = getattr(data_source, "_ws_assistant", None)
+            public_recv = float(getattr(ws, "last_recv_time", 0) or 0)
+            if public_recv > 0 and public_recv != self._last_public_ws_recv:
+                self._public_ws_ticks += 1
+                self._last_public_ws_recv = public_recv
+        except Exception:
+            pass
+
+        try:
+            user_stream_tracker = getattr(connector, "_user_stream_tracker", None)
+            private_recv = float(getattr(user_stream_tracker.data_source, "last_recv_time", 0) or 0)
+            if private_recv > 0 and private_recv != self._last_private_ws_recv:
+                self._private_ws_ticks += 1
+                self._last_private_ws_recv = private_recv
+        except Exception:
+            pass
+
+        # Cache recent public trades inferred from live order book trade price changes.
+        try:
+            ob = connector.order_book_tracker.order_books.get(self.config.trading_pair)
+            if ob is None:
+                return
+            trade_price = ob.last_trade_price
+            if trade_price is None:
+                return
+            trade_price_decimal = Decimal(str(trade_price))
+            if self._last_ob_trade_price is None or trade_price_decimal != self._last_ob_trade_price:
+                self._recent_public_trades.append(
+                    {
+                        "ts": int(self.current_timestamp),
+                        "price": trade_price_decimal,
+                    }
+                )
+                self._last_ob_trade_price = trade_price_decimal
+        except Exception:
+            pass
 
     def on_tick(self):
         if self.current_timestamp < self._next_refresh_ts:
@@ -200,9 +253,13 @@ class ExchangeTest(ScriptStrategyBase):
 
             lines.append("")
             lines.append("Transport")
-            lines.append(f"Public WS: {self._public_ws_status()} (last recv {self._public_ws_last_recv_age()})")
+            lines.append(
+                f"Public WS: {self._public_ws_status()} (last recv {self._public_ws_last_recv_age()}, ticks={self._public_ws_ticks})"
+            )
             lines.append(f"Public REST: {self._rest_status(self._public_rest_last_ok_ts)}")
-            lines.append(f"Private WS: {self._private_ws_status()} (last recv {self._private_ws_last_recv_age()})")
+            lines.append(
+                f"Private WS: {self._private_ws_status()} (last recv {self._private_ws_last_recv_age()}, ticks={self._private_ws_ticks})"
+            )
             lines.append(f"Private REST: {self._rest_status(self._private_rest_last_ok_ts)}")
 
             if self._last_public_error:
@@ -231,6 +288,12 @@ class ExchangeTest(ScriptStrategyBase):
                     lines.append("Order book not initialized for pair yet.")
                 else:
                     lines.append(f"Last trade price (from order book): {ob.last_trade_price}")
+                    if len(self._recent_public_trades) == 0:
+                        lines.append("No recent trade updates captured yet.")
+                    else:
+                        lines.append("Recent trades (live cache):")
+                        for t in list(self._recent_public_trades)[-10:]:
+                            lines.append(f"  t={t['ts']} price={t['price']}")
 
             if self.config.show_public_order_book:
                 lines.append("")
