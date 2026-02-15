@@ -91,7 +91,11 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             payload = {
                 "id": int(time.time() * 1e3),
                 "method": "subscribe",
-                "params": {"channels": channels},
+                "params": {
+                    "channels": channels,
+                    "book_subscription_type": "SNAPSHOT_AND_UPDATE",
+                    "book_update_frequency": 100,
+                },
             }
             await ws.send(WSJSONRequest(payload=payload))
 
@@ -222,6 +226,33 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         # Preserve order while removing duplicates.
         return list(dict.fromkeys(candidates))
 
+    def _extract_instrument_name(self, result: Dict[str, Any]) -> str:
+        """
+        Docs-compliant extractor:
+        - `channel` may be `book` / `book.update` (no symbol),
+        - symbol may be in `subscription` or `instrument_name`.
+        """
+        channel = str(result.get("channel", ""))
+        subscription = str(result.get("subscription", ""))
+        instrument_name = str(result.get("instrument_name", ""))
+
+        # Legacy style: book.BTC_USD.50 / trade.BTC_USD
+        if "." in channel:
+            parts = channel.split(".")
+            if len(parts) >= 2 and parts[0] in {"book", "trade"} and parts[1] not in {"", "update"}:
+                return parts[1]
+
+        # Current docs style: channel without symbol + subscription with symbol.
+        if subscription.startswith("book.") or subscription.startswith("trade."):
+            parts = subscription.split(".")
+            if len(parts) >= 2:
+                return parts[1]
+
+        if instrument_name:
+            return instrument_name
+
+        return ""
+
     def trade_message_from_exchange(self, msg: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> OrderBookMessage:
         payload = dict(msg)
         if metadata:
@@ -247,8 +278,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
     async def _parse_trade_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
         result = raw_message.get("result", {})
-        channel = str(result.get("channel", ""))
-        symbol = channel.split(".", 1)[1] if "." in channel else ""
+        symbol = self._extract_instrument_name(result)
         if not symbol:
             return
         trading_pair = await self._connector.trading_pair_associated_to_exchange_symbol(symbol=symbol)
@@ -263,28 +293,34 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
     async def _parse_order_book_snapshot_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
         result = raw_message.get("result", {})
-        channel = str(result.get("channel", ""))
-        parts = channel.split(".")
-        if len(parts) < 2:
+        symbol = self._extract_instrument_name(result)
+        if not symbol:
             return
-        symbol = parts[1]
         trading_pair = await self._connector.trading_pair_associated_to_exchange_symbol(symbol=symbol)
 
         data = result.get("data", [])
         if len(data) == 0:
             return
 
-        for snapshot in data:
-            snapshot_message = self.snapshot_message_from_exchange(snapshot, {"trading_pair": trading_pair})
+        for item in data:
+            # Update-mode entries are nested under `update`; snapshot-mode entries are top-level.
+            payload = dict(item.get("update", item))
+            if "tt" not in payload and "tt" in item:
+                payload["tt"] = item["tt"]
+            if "t" not in payload and "t" in item:
+                payload["t"] = item["t"]
+
+            snapshot_message = self.snapshot_message_from_exchange(payload, {"trading_pair": trading_pair})
             self._last_book_update_id[trading_pair] = int(snapshot_message.update_id)
             message_queue.put_nowait(snapshot_message)
 
     def _channel_originating_message(self, event_message: Dict[str, Any]) -> str:
         result = event_message.get("result", {})
         channel = str(result.get("channel", ""))
-        if channel.startswith("book."):
+        subscription = str(result.get("subscription", ""))
+        if channel in {"book", "book.update"} or channel.startswith("book.") or subscription.startswith("book."):
             return self._diff_messages_queue_key
-        if channel.startswith("trade."):
+        if channel in {"trade", "trade.update"} or channel.startswith("trade.") or subscription.startswith("trade."):
             return self._trade_messages_queue_key
         return ""
 
