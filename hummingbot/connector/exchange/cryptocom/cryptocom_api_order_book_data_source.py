@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
     HEARTBEAT_TIME_INTERVAL = 30.0
+    WS_BOOK_DEPTH = 50
 
     _logger: Optional[HummingbotLogger] = None
 
@@ -84,7 +85,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             channels = []
             for trading_pair in self._trading_pairs:
                 symbol = await self._connector.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
-                channels.extend([f"trade.{symbol}", f"book.{symbol}.150"])
+                channels.extend([f"trade.{symbol}", f"book.{symbol}.{self.WS_BOOK_DEPTH}"])
 
             payload = {
                 "id": int(time.time() * 1e3),
@@ -277,6 +278,14 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
     async def _process_message_for_unknown_channel(self, event_message: Dict[str, Any], websocket_assistant: WSAssistant):
         if event_message.get("method") == "public/heartbeat":
             await websocket_assistant.send(WSJSONRequest(payload={"id": event_message.get("id"), "method": "public/respond-heartbeat"}))
+            return
+
+        if "code" in event_message and int(event_message.get("code", 0)) != 0:
+            self.logger().warning(f"Crypto.com WS non-zero code message: {event_message}")
+            return
+
+        if event_message.get("method") in {"subscribe", "unsubscribe"}:
+            self.logger().debug(f"Crypto.com WS subscription message: {event_message}")
 
     async def subscribe_to_trading_pair(self, trading_pair: str) -> bool:
         if self._ws_assistant is None:
@@ -291,7 +300,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
                 "params": {
                     "channels": [
                         f"trade.{symbol}",
-                        f"book.{symbol}.150",
+                        f"book.{symbol}.{self.WS_BOOK_DEPTH}",
                     ]
                 },
             }
@@ -318,7 +327,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
                 "params": {
                     "channels": [
                         f"trade.{symbol}",
-                        f"book.{symbol}.150",
+                        f"book.{symbol}.{self.WS_BOOK_DEPTH}",
                     ]
                 },
             }
