@@ -101,6 +101,7 @@ class ExchangeTest(ScriptStrategyBase):
         self._last_best_bid: Optional[Decimal] = None
         self._last_best_ask: Optional[Decimal] = None
         self._order_book_top_changes: int = 0
+        self._symbol_map_contract_ok: Optional[bool] = None
 
     def tick(self, timestamp: float):
         # Diagnostic scripts should keep running even if connector readiness is partial.
@@ -204,6 +205,13 @@ class ExchangeTest(ScriptStrategyBase):
             except Exception as e:
                 self._last_public_error = str(e)
 
+        # Canonical symbol map contract check: pair -> exchange symbol lookup used by connectors/strategies.
+        try:
+            symbol = await connector.exchange_symbol_associated_to_pair(trading_pair=self.config.trading_pair)
+            self._symbol_map_contract_ok = symbol is not None and len(str(symbol)) > 0
+        except Exception:
+            self._symbol_map_contract_ok = False
+
         if any([self.config.show_private_balance, self.config.show_private_open_orders, self.config.show_private_order_history]):
             try:
                 # REST private probe + updates cached balances.
@@ -278,8 +286,7 @@ class ExchangeTest(ScriptStrategyBase):
         pair_ok = "-" in self.config.trading_pair and len(self.config.trading_pair.split("-")) == 2
         checks.append(("trading_pair format BASE-QUOTE", pair_ok))
 
-        symbol_map = getattr(connector, "_trading_pair_symbol_map", None)
-        symbol_map_ok = symbol_map is not None and self.config.trading_pair in getattr(symbol_map, "inverse", {})
+        symbol_map_ok = self._symbol_map_contract_ok is True
         checks.append(("symbol map contains configured trading_pair", symbol_map_ok))
 
         ob_ok = ob is not None
