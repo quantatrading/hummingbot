@@ -100,10 +100,12 @@ class ExchangeTest(ScriptStrategyBase):
             return
         if self._refresh_task is not None and not self._refresh_task.done():
             return
+        # REST probes are intentionally throttled by refresh_interval.
+        # WS-backed values are read live in format_status() on each render.
         self._next_refresh_ts = self.current_timestamp + max(1, int(self.config.refresh_interval))
-        self._refresh_task = safe_ensure_future(self._refresh_state())
+        self._refresh_task = safe_ensure_future(self._refresh_rest_state())
 
-    async def _refresh_state(self):
+    async def _refresh_rest_state(self):
         connector = self.connectors[self.config.exchange]
 
         if any([self.config.show_public_prices, self.config.show_public_trades, self.config.show_public_order_book]):
@@ -134,6 +136,19 @@ class ExchangeTest(ScriptStrategyBase):
         except Exception:
             return "UNKNOWN"
 
+    def _public_ws_last_recv_age(self) -> str:
+        try:
+            data_source = self.connectors[self.config.exchange].order_book_tracker.data_source
+            ws = getattr(data_source, "_ws_assistant", None)
+            if ws is None:
+                return "n/a"
+            last_recv = float(getattr(ws, "last_recv_time", 0) or 0)
+            if last_recv <= 0:
+                return "n/a"
+            return f"{int(self.current_timestamp - last_recv)}s ago"
+        except Exception:
+            return "n/a"
+
     def _private_ws_status(self) -> str:
         try:
             user_stream_tracker = getattr(self.connectors[self.config.exchange], "_user_stream_tracker", None)
@@ -143,6 +158,18 @@ class ExchangeTest(ScriptStrategyBase):
             return "CONNECTED" if last_recv > 0 else "DISCONNECTED"
         except Exception:
             return "UNKNOWN"
+
+    def _private_ws_last_recv_age(self) -> str:
+        try:
+            user_stream_tracker = getattr(self.connectors[self.config.exchange], "_user_stream_tracker", None)
+            if user_stream_tracker is None:
+                return "n/a"
+            last_recv = float(user_stream_tracker.data_source.last_recv_time or 0)
+            if last_recv <= 0:
+                return "n/a"
+            return f"{int(self.current_timestamp - last_recv)}s ago"
+        except Exception:
+            return "n/a"
 
     def _rest_status(self, last_ok_ts: float) -> str:
         if last_ok_ts <= 0:
@@ -163,7 +190,8 @@ class ExchangeTest(ScriptStrategyBase):
             lines.append(f"Connector: {self.config.exchange}")
             lines.append(f"Pair: {self.config.trading_pair}")
             lines.append(f"Connector ready: {connector.ready}")
-            lines.append(f"Refresh interval: {self.config.refresh_interval}s")
+            lines.append(f"REST poll interval: {self.config.refresh_interval}s")
+            lines.append("WS mode: live (updates on every status refresh)")
             status = getattr(connector, "status_dict", {})
             if len(status) > 0:
                 lines.append("Readiness detail:")
@@ -172,9 +200,9 @@ class ExchangeTest(ScriptStrategyBase):
 
             lines.append("")
             lines.append("Transport")
-            lines.append(f"Public WS: {self._public_ws_status()}")
+            lines.append(f"Public WS: {self._public_ws_status()} (last recv {self._public_ws_last_recv_age()})")
             lines.append(f"Public REST: {self._rest_status(self._public_rest_last_ok_ts)}")
-            lines.append(f"Private WS: {self._private_ws_status()}")
+            lines.append(f"Private WS: {self._private_ws_status()} (last recv {self._private_ws_last_recv_age()})")
             lines.append(f"Private REST: {self._rest_status(self._private_rest_last_ok_ts)}")
 
             if self._last_public_error:
