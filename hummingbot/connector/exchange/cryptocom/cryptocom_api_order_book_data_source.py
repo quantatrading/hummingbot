@@ -33,6 +33,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         self._diff_messages_queue_key = CONSTANTS.DIFF_EVENT_TYPE
         self._domain = domain
         self._api_factory = api_factory
+        self._last_book_update_id: Dict[str, int] = {}
 
     async def get_last_traded_prices(self, trading_pairs: List[str], domain: Optional[str] = None) -> Dict[str, float]:
         return await self._connector.get_last_traded_prices(trading_pairs=trading_pairs)
@@ -104,14 +105,9 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         if metadata:
             payload.update(metadata)
 
-        update_id = int(
-            payload.get("u")
-            or payload.get("update_id")
-            or payload.get("t")
-            or int(time.time() * 1e3)
-        )
-        bids = payload.get("bids") or payload.get("b") or []
-        asks = payload.get("asks") or payload.get("a") or []
+        update_id = self._extract_book_update_id(payload)
+        bids = self._normalize_book_entries(payload.get("bids") or payload.get("b") or [])
+        asks = self._normalize_book_entries(payload.get("asks") or payload.get("a") or [])
 
         return OrderBookMessage(
             OrderBookMessageType.SNAPSHOT,
@@ -133,25 +129,54 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         if metadata:
             payload.update(metadata)
 
-        update_id = int(
-            payload.get("u")
-            or payload.get("update_id")
-            or payload.get("t")
-            or int(time.time() * 1e3)
-        )
-        bids = payload.get("bids") or payload.get("b") or []
-        asks = payload.get("asks") or payload.get("a") or []
+        trading_pair = payload["trading_pair"]
+        update_id = self._next_monotonic_book_update_id(trading_pair=trading_pair, payload=payload)
+        bids = self._normalize_book_entries(payload.get("bids") or payload.get("b") or [])
+        asks = self._normalize_book_entries(payload.get("asks") or payload.get("a") or [])
 
         return OrderBookMessage(
             OrderBookMessageType.DIFF,
             {
-                "trading_pair": payload["trading_pair"],
+                "trading_pair": trading_pair,
                 "update_id": update_id,
                 "bids": bids,
                 "asks": asks,
             },
             timestamp=update_id * 1e-3,
         )
+
+    def _extract_book_update_id(self, payload: Dict[str, Any]) -> int:
+        return int(
+            payload.get("u")
+            or payload.get("update_id")
+            or payload.get("tt")
+            or payload.get("t")
+            or int(time.time() * 1e3)
+        )
+
+    def _next_monotonic_book_update_id(self, trading_pair: str, payload: Dict[str, Any]) -> int:
+        candidate = self._extract_book_update_id(payload)
+        last = self._last_book_update_id.get(trading_pair, 0)
+        if candidate <= last:
+            # Ensure strictly increasing IDs so tracker accepts incremental updates.
+            candidate = max(last + 1, int(time.time() * 1e3))
+        self._last_book_update_id[trading_pair] = candidate
+        return candidate
+
+    def _normalize_book_entries(self, entries: Any) -> List[List[str]]:
+        normalized: List[List[str]] = []
+        if not isinstance(entries, list):
+            return normalized
+
+        for entry in entries:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                normalized.append([str(entry[0]), str(entry[1])])
+            elif isinstance(entry, dict):
+                price = entry.get("p") or entry.get("price")
+                amount = entry.get("q") or entry.get("qty") or entry.get("quantity") or entry.get("amount")
+                if price is not None and amount is not None:
+                    normalized.append([str(price), str(amount)])
+        return normalized
 
     def trade_message_from_exchange(self, msg: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> OrderBookMessage:
         payload = dict(msg)

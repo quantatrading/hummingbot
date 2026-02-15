@@ -346,11 +346,15 @@ class ExchangeTest(ScriptStrategyBase):
                         f"last_update={ob_update_age}"
                     )
                     depth = max(1, int(self.config.order_book_depth))
-                    lines.append("Top bids:")
-                    for row in islice(ob.bid_entries(), depth):
+                    # Requested output layout: asks above bids, asks in descending price order.
+                    ask_rows = list(islice(ob.ask_entries(), depth))
+                    ask_rows_desc = sorted(ask_rows, key=lambda r: Decimal(str(r.price)), reverse=True)
+                    bid_rows = list(islice(ob.bid_entries(), depth))
+                    lines.append("Top asks (desc):")
+                    for row in ask_rows_desc:
                         lines.append(f"  {row.price} x {row.amount}")
-                    lines.append("Top asks:")
-                    for row in islice(ob.ask_entries(), depth):
+                    lines.append("Top bids:")
+                    for row in bid_rows:
                         lines.append(f"  {row.price} x {row.amount}")
 
             if self.config.show_private_open_orders:
