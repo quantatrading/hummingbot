@@ -94,6 +94,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             snapshot_data,
             metadata={"trading_pair": trading_pair},
         )
+        self._last_book_update_id[trading_pair] = int(snapshot_msg.update_id)
         return snapshot_msg
 
     def snapshot_message_from_exchange(
@@ -146,17 +147,23 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         )
 
     def _extract_book_update_id(self, payload: Dict[str, Any]) -> int:
-        return int(
+        update_id = int(
             payload.get("u")
             or payload.get("update_id")
             or payload.get("tt")
             or payload.get("t")
             or int(time.time() * 1e3)
         )
+        # Some payload variants expose second-based timestamps; normalize to milliseconds.
+        if update_id < 10**12:
+            update_id *= 1000
+        return update_id
 
     def _next_monotonic_book_update_id(self, trading_pair: str, payload: Dict[str, Any]) -> int:
         candidate = self._extract_book_update_id(payload)
         last = self._last_book_update_id.get(trading_pair, 0)
+        # Keep diff ids ahead of snapshot/update history so tracker does not reject them.
+        candidate = max(candidate, int(time.time() * 1e3), last + 1)
         if candidate <= last:
             # Ensure strictly increasing IDs so tracker accepts incremental updates.
             candidate = max(last + 1, int(time.time() * 1e3))
