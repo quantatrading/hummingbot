@@ -263,8 +263,13 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         side = str(payload.get("s", "")).upper()
         trade_type = float(TradeType.BUY.value) if side == "BUY" else float(TradeType.SELL.value)
         trade_id = payload.get("d") or payload.get("id") or payload.get("t")
-        timestamp_raw = int(payload.get("t", int(time.time())))
+        now_ts = time.time()
+        timestamp_raw = int(payload.get("t", int(now_ts)))
         timestamp = self._normalize_timestamp(timestamp_raw)
+        # Contract expected by strategy-side indicators:
+        # epoch seconds, close to local current time.
+        if abs(now_ts - timestamp) > 120:
+            timestamp = now_ts
         timestamp_ms = int(timestamp * 1e3)
 
         return OrderBookMessage(
