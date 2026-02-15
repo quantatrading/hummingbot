@@ -429,6 +429,9 @@ class ExchangeTest(ScriptStrategyBase):
                     if callable(parsed_getter):
                         parsed_trades = parsed_getter(self.config.trading_pair, max(1, int(self.config.public_trades_display_count)))
                         lines.append(f"Parsed trade payloads (last {len(parsed_trades)}) [WS]:")
+                        invalid_count_getter = getattr(data_source, "invalid_trade_payloads_count", None)
+                        if callable(invalid_count_getter):
+                            lines.append(f"  invalid trade payloads dropped: {invalid_count_getter()}")
                         if len(parsed_trades) == 0:
                             lines.append("  No parsed trades available from connector data source yet.")
                         else:

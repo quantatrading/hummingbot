@@ -222,10 +222,17 @@ class CryptocomExchange(ExchangePyBase):
             "order_id": exchange_order_id,
         }
         cancel_result = await self._api_private_post(path_url=CONSTANTS.CANCEL_ORDER_PATH_URL, params=params)
-        status = str(cancel_result.get("status") or "").upper()
+        # Crypto.com cancel is asynchronous: success response commonly confirms receipt
+        # with identifiers (order_id/client_oid) and no terminal status.
+        status = str(cancel_result.get("status") or cancel_result.get("order_status") or "").upper()
         if status in {"PENDING_CANCEL", "CANCELED", "CANCELLED", "CANCELED_BY_USER"}:
             return True
-        return False
+
+        has_cancel_ack = any(
+            key in cancel_result and cancel_result.get(key) not in (None, "")
+            for key in ["order_id", "client_oid", "client_order_id"]
+        )
+        return has_cancel_ack or len(cancel_result) == 0
 
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
         result = self._extract_result(exchange_info_dict)
@@ -422,7 +429,7 @@ class CryptocomExchange(ExchangePyBase):
 
     async def _request_order_status(self, tracked_order: InFlightOrder) -> OrderUpdate:
         symbol = await self.exchange_symbol_associated_to_pair(trading_pair=tracked_order.trading_pair)
-        order_result = await self._api_private_post(
+        order_result_raw = await self._api_private_post(
             path_url=CONSTANTS.ORDER_DETAIL_PATH_URL,
             params={
                 "instrument_name": symbol,
@@ -430,7 +437,21 @@ class CryptocomExchange(ExchangePyBase):
             },
         )
 
-        status = str(order_result.get("status") or "").upper()
+        # Response shape can vary (v1/v2.1 migration): direct object, order_info object, or data list/object.
+        order_result = order_result_raw
+        if isinstance(order_result_raw.get("order_info"), dict):
+            order_result = order_result_raw.get("order_info")
+        elif isinstance(order_result_raw.get("data"), list) and len(order_result_raw.get("data")) > 0:
+            order_result = order_result_raw.get("data")[0]
+        elif isinstance(order_result_raw.get("data"), dict):
+            order_result = order_result_raw.get("data")
+
+        status = str(
+            order_result.get("status")
+            or order_result.get("order_status")
+            or order_result.get("state")
+            or ""
+        ).upper()
         update_time = float(order_result.get("update_time") or order_result.get("create_time") or self.current_timestamp)
         if update_time > 1e12:
             update_time *= 1e-3

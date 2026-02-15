@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections import defaultdict, deque
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from hummingbot.connector.exchange.cryptocom import cryptocom_constants as CONSTANTS, cryptocom_web_utils as web_utils
@@ -37,6 +38,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         self._api_factory = api_factory
         self._last_book_update_id: Dict[str, int] = {}
         self._recent_parsed_trades: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
+        self._invalid_trade_payloads_count: int = 0
 
     async def get_last_traded_prices(self, trading_pairs: List[str], domain: Optional[str] = None) -> Dict[str, float]:
         return await self._connector.get_last_traded_prices(trading_pairs=trading_pairs)
@@ -260,16 +262,9 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         if metadata:
             payload.update(metadata)
 
-        side = str(payload.get("s", "")).upper()
-        trade_type = float(TradeType.BUY.value) if side == "BUY" else float(TradeType.SELL.value)
-        trade_id = payload.get("d") or payload.get("id") or payload.get("t")
-        now_ts = time.time()
-        timestamp_raw = int(payload.get("t", int(now_ts)))
-        timestamp = self._normalize_timestamp(timestamp_raw)
-        # Contract expected by strategy-side indicators:
-        # epoch seconds, close to local current time.
-        if abs(now_ts - timestamp) > 120:
-            timestamp = now_ts
+        normalized = self._normalized_trade_payload(payload)
+        trade_type = float(TradeType.BUY.value) if normalized["trade_type"] == "buy" else float(TradeType.SELL.value)
+        timestamp = normalized["timestamp"]
         timestamp_ms = int(timestamp * 1e3)
 
         return OrderBookMessage(
@@ -277,12 +272,56 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             {
                 "trading_pair": payload["trading_pair"],
                 "trade_type": trade_type,
-                "trade_id": trade_id,
+                "trade_id": normalized["trade_id"],
                 "update_id": timestamp_ms,
-                "price": payload.get("p"),
-                "amount": payload.get("q"),
+                "price": normalized["price"],
+                "amount": normalized["amount"],
             },
             timestamp=timestamp,
+        )
+
+    def _normalized_trade_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        side = str(payload.get("s") or payload.get("side") or "").lower()
+        trade_type = "buy" if side == "buy" else "sell"
+
+        trade_id = payload.get("d") or payload.get("trade_id") or payload.get("id") or payload.get("t")
+        if trade_id is None:
+            trade_id = int(time.time() * 1e6)
+
+        price_raw = payload.get("p") or payload.get("price")
+        amount_raw = payload.get("q") or payload.get("qty") or payload.get("quantity") or payload.get("amount")
+
+        timestamp_raw = payload.get("t") or payload.get("tt") or payload.get("timestamp") or payload.get("time")
+        now_ts = time.time()
+        timestamp = self._normalize_timestamp(int(timestamp_raw)) if timestamp_raw is not None else now_ts
+        # Strategy contract: normalized epoch seconds close to current runtime.
+        if abs(now_ts - timestamp) > 120:
+            timestamp = now_ts
+
+        return {
+            "trade_id": str(trade_id),
+            "price": str(price_raw) if price_raw is not None else "",
+            "amount": str(amount_raw) if amount_raw is not None else "",
+            "trade_type": trade_type,
+            "timestamp": timestamp,
+        }
+
+    def _is_valid_trade_payload(self, normalized: Dict[str, Any]) -> bool:
+        try:
+            price = Decimal(normalized["price"])
+            amount = Decimal(normalized["amount"])
+            ts = float(normalized["timestamp"])
+        except Exception:
+            return False
+
+        return (
+            len(str(normalized["trade_id"])) > 0
+            and normalized["trade_type"] in {"buy", "sell"}
+            and price.is_finite()
+            and amount.is_finite()
+            and price > Decimal("0")
+            and amount > Decimal("0")
+            and ts > 0
         )
 
     def _normalize_timestamp(self, value: int) -> float:
@@ -304,6 +343,9 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             return trades
         return trades[-limit:]
 
+    def invalid_trade_payloads_count(self) -> int:
+        return self._invalid_trade_payloads_count
+
     async def _parse_trade_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
         result = raw_message.get("result", {})
         symbol = self._extract_instrument_name(result)
@@ -312,16 +354,23 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         trading_pair = await self._connector.trading_pair_associated_to_exchange_symbol(symbol=symbol)
 
         for trade in result.get("data", []):
+            payload = dict(trade)
+            payload["trading_pair"] = trading_pair
+            normalized = self._normalized_trade_payload(payload)
+            if not self._is_valid_trade_payload(normalized):
+                self._invalid_trade_payloads_count += 1
+                continue
+
             trade_message = self.trade_message_from_exchange(trade, {"trading_pair": trading_pair})
             message_queue.put_nowait(trade_message)
             trade_type = "buy" if trade_message.content["trade_type"] == float(TradeType.BUY.value) else "sell"
             self._recent_parsed_trades[trading_pair].append(
                 {
-                    "trade_id": str(trade_message.content["trade_id"]),
-                    "price": trade_message.content["price"],
-                    "amount": trade_message.content["amount"],
+                    "trade_id": normalized["trade_id"],
+                    "price": normalized["price"],
+                    "amount": normalized["amount"],
                     "trade_type": trade_type,
-                    "timestamp": float(trade_message.timestamp),
+                    "timestamp": normalized["timestamp"],
                 }
             )
 
