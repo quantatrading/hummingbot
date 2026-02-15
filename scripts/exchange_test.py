@@ -167,6 +167,8 @@ class ExchangeTest(ScriptStrategyBase):
             if trade_price is None:
                 return
             trade_price_decimal = Decimal(str(trade_price))
+            if trade_price_decimal.is_nan():
+                return
             if self._last_ob_trade_price is None or trade_price_decimal != self._last_ob_trade_price:
                 self._public_trade_seq += 1
                 self._recent_public_trades.append(
