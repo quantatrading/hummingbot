@@ -1,5 +1,6 @@
 import os
 from decimal import Decimal
+from itertools import islice
 from typing import Any, Dict, List, Optional
 
 from pydantic import Field
@@ -151,108 +152,113 @@ class ExchangeTest(ScriptStrategyBase):
         return f"OK ({int(age)}s ago)" if age <= stale_threshold else f"STALE ({int(age)}s ago)"
 
     def format_status(self) -> str:
-        lines: List[str] = []
-        connector = self.connectors[self.config.exchange]
+        try:
+            lines: List[str] = []
+            connector = self.connectors.get(self.config.exchange)
+            if connector is None:
+                return f"Exchange Test\nConnector '{self.config.exchange}' is not loaded."
 
-        lines.append("")
-        lines.append("Exchange Test")
-        lines.append(f"Connector: {self.config.exchange}")
-        lines.append(f"Pair: {self.config.trading_pair}")
-        lines.append(f"Connector ready: {connector.ready}")
-        lines.append(f"Refresh interval: {self.config.refresh_interval}s")
-        status = getattr(connector, "status_dict", {})
-        if len(status) > 0:
-            lines.append("Readiness detail:")
-            for key, val in status.items():
-                lines.append(f"  {key}: {val}")
-
-        lines.append("")
-        lines.append("Transport")
-        lines.append(f"Public WS: {self._public_ws_status()}")
-        lines.append(f"Public REST: {self._rest_status(self._public_rest_last_ok_ts)}")
-        lines.append(f"Private WS: {self._private_ws_status()}")
-        lines.append(f"Private REST: {self._rest_status(self._private_rest_last_ok_ts)}")
-
-        if self._last_public_error:
-            lines.append(f"Last public error: {self._last_public_error}")
-        if self._last_private_error:
-            lines.append(f"Last private error: {self._last_private_error}")
-
-        if self.config.show_public_prices:
             lines.append("")
-            lines.append("Public: Prices")
-            mid_price = connector.get_mid_price(self.config.trading_pair)
-            bid = connector.get_price(self.config.trading_pair, is_buy=False)
-            ask = connector.get_price(self.config.trading_pair, is_buy=True)
-            lines.append(f"REST last traded: {self._last_public_rest_price}")
-            lines.append(f"Mid: {mid_price} | Bid: {bid} | Ask: {ask}")
+            lines.append("Exchange Test")
+            lines.append(f"Connector: {self.config.exchange}")
+            lines.append(f"Pair: {self.config.trading_pair}")
+            lines.append(f"Connector ready: {connector.ready}")
+            lines.append(f"Refresh interval: {self.config.refresh_interval}s")
+            status = getattr(connector, "status_dict", {})
+            if len(status) > 0:
+                lines.append("Readiness detail:")
+                for key, val in status.items():
+                    lines.append(f"  {key}: {val}")
 
-        if self.config.show_public_trades:
             lines.append("")
-            lines.append("Public: Trades")
+            lines.append("Transport")
+            lines.append(f"Public WS: {self._public_ws_status()}")
+            lines.append(f"Public REST: {self._rest_status(self._public_rest_last_ok_ts)}")
+            lines.append(f"Private WS: {self._private_ws_status()}")
+            lines.append(f"Private REST: {self._rest_status(self._private_rest_last_ok_ts)}")
+
+            if self._last_public_error:
+                lines.append(f"Last public error: {self._last_public_error}")
+            if self._last_private_error:
+                lines.append(f"Last private error: {self._last_private_error}")
+
+            if self.config.show_public_prices:
+                lines.append("")
+                lines.append("Public: Prices")
+                try:
+                    mid_price = connector.get_mid_price(self.config.trading_pair)
+                    bid = connector.get_price(self.config.trading_pair, is_buy=False)
+                    ask = connector.get_price(self.config.trading_pair, is_buy=True)
+                    lines.append(f"REST last traded: {self._last_public_rest_price}")
+                    lines.append(f"Mid: {mid_price} | Bid: {bid} | Ask: {ask}")
+                except Exception as e:
+                    lines.append(f"Price read error: {e}")
+
             ob = connector.order_book_tracker.order_books.get(self.config.trading_pair)
-            if ob is None:
-                lines.append("Order book not initialized for pair yet.")
-            else:
-                lines.append(f"Last trade price (from order book): {ob.last_trade_price}")
 
-        if self.config.show_public_order_book:
-            lines.append("")
-            lines.append("Public: Order Book")
-            ob = connector.order_book_tracker.order_books.get(self.config.trading_pair)
-            if ob is None:
-                lines.append("Order book not initialized for pair yet.")
-            else:
-                bids_df, asks_df = ob.snapshot
-                depth = max(1, int(self.config.order_book_depth))
-                top_bids = bids_df.head(depth)
-                top_asks = asks_df.head(depth)
-                lines.append("Top bids:")
-                for _, row in top_bids.iterrows():
-                    lines.append(f"  {row['price']} x {row['amount']}")
-                lines.append("Top asks:")
-                for _, row in top_asks.iterrows():
-                    lines.append(f"  {row['price']} x {row['amount']}")
-
-        if self.config.show_private_open_orders:
-            lines.append("")
-            lines.append("Private: Open Orders")
-            open_orders = self.get_active_orders(self.config.exchange)
-            if len(open_orders) == 0:
-                lines.append("No active open orders.")
-            else:
-                for order in open_orders:
-                    side = "BUY" if order.is_buy else "SELL"
-                    lines.append(
-                        f"  {order.client_order_id} | {side} | {order.trading_pair} | qty={order.quantity} | px={order.price}"
-                    )
-
-        if self.config.show_private_order_history:
-            lines.append("")
-            lines.append("Private: Order History (local cache)")
-            order_tracker = getattr(connector, "_order_tracker", None)
-            if order_tracker is None:
-                lines.append("Order tracker not available.")
-            else:
-                cached = list(order_tracker.cached_orders.values())[-10:]
-                lost = list(order_tracker.lost_orders.values())[-10:]
-                if len(cached) == 0 and len(lost) == 0:
-                    lines.append("No cached/lost historical orders.")
+            if self.config.show_public_trades:
+                lines.append("")
+                lines.append("Public: Trades")
+                if ob is None:
+                    lines.append("Order book not initialized for pair yet.")
                 else:
-                    for o in cached:
-                        lines.append(f"  CACHED {o.client_order_id} | {o.trading_pair} | state={o.current_state}")
-                    for o in lost:
-                        lines.append(f"  LOST   {o.client_order_id} | {o.trading_pair} | state={o.current_state}")
+                    lines.append(f"Last trade price (from order book): {ob.last_trade_price}")
 
-        if self.config.show_private_balance:
-            lines.append("")
-            lines.append("Private: Balance")
-            balances = connector.get_all_balances()
-            if len(balances) == 0:
-                lines.append("No balances loaded.")
-            else:
-                for asset, total in sorted(balances.items()):
-                    available = connector.get_available_balance(asset)
-                    lines.append(f"  {asset}: total={Decimal(str(total))} available={Decimal(str(available))}")
+            if self.config.show_public_order_book:
+                lines.append("")
+                lines.append("Public: Order Book")
+                if ob is None:
+                    lines.append("Order book not initialized for pair yet.")
+                else:
+                    depth = max(1, int(self.config.order_book_depth))
+                    lines.append("Top bids:")
+                    for row in islice(ob.bid_entries(), depth):
+                        lines.append(f"  {row.price} x {row.amount}")
+                    lines.append("Top asks:")
+                    for row in islice(ob.ask_entries(), depth):
+                        lines.append(f"  {row.price} x {row.amount}")
 
-        return "\n".join(lines)
+            if self.config.show_private_open_orders:
+                lines.append("")
+                lines.append("Private: Open Orders")
+                open_orders = self.get_active_orders(self.config.exchange)
+                if len(open_orders) == 0:
+                    lines.append("No active open orders.")
+                else:
+                    for order in open_orders:
+                        side = "BUY" if order.is_buy else "SELL"
+                        lines.append(
+                            f"  {order.client_order_id} | {side} | {order.trading_pair} | qty={order.quantity} | px={order.price}"
+                        )
+
+            if self.config.show_private_order_history:
+                lines.append("")
+                lines.append("Private: Order History (local cache)")
+                order_tracker = getattr(connector, "_order_tracker", None)
+                if order_tracker is None:
+                    lines.append("Order tracker not available.")
+                else:
+                    cached = list(order_tracker.cached_orders.values())[-10:]
+                    lost = list(order_tracker.lost_orders.values())[-10:]
+                    if len(cached) == 0 and len(lost) == 0:
+                        lines.append("No cached/lost historical orders.")
+                    else:
+                        for o in cached:
+                            lines.append(f"  CACHED {o.client_order_id} | {o.trading_pair} | state={o.current_state}")
+                        for o in lost:
+                            lines.append(f"  LOST   {o.client_order_id} | {o.trading_pair} | state={o.current_state}")
+
+            if self.config.show_private_balance:
+                lines.append("")
+                lines.append("Private: Balance")
+                balances = connector.get_all_balances()
+                if len(balances) == 0:
+                    lines.append("No balances loaded.")
+                else:
+                    for asset, total in sorted(balances.items()):
+                        available = connector.get_available_balance(asset)
+                        lines.append(f"  {asset}: total={Decimal(str(total))} available={Decimal(str(available))}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Exchange Test\nformat_status error: {e}"
