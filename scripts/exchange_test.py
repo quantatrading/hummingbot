@@ -39,6 +39,10 @@ class ExchangeTestConfig(BaseClientModel):
         True,
         json_schema_extra={"prompt": "Show public trades? (Yes/No): ", "prompt_on_new": True},
     )
+    public_trades_display_count: int = Field(
+        10,
+        json_schema_extra={"prompt": "Number of recent public trades to display (e.g. 10): ", "prompt_on_new": True},
+    )
     show_public_order_book: bool = Field(
         True,
         json_schema_extra={"prompt": "Show public order book? (Yes/No): ", "prompt_on_new": True},
@@ -90,6 +94,7 @@ class ExchangeTest(ScriptStrategyBase):
         self._last_private_ws_recv: float = 0
         self._last_ob_trade_price: Optional[Decimal] = None
         self._recent_public_trades = deque(maxlen=25)
+        self._public_trade_seq: int = 0
 
     def tick(self, timestamp: float):
         # Diagnostic scripts should keep running even if connector readiness is partial.
@@ -138,8 +143,10 @@ class ExchangeTest(ScriptStrategyBase):
                 return
             trade_price_decimal = Decimal(str(trade_price))
             if self._last_ob_trade_price is None or trade_price_decimal != self._last_ob_trade_price:
+                self._public_trade_seq += 1
                 self._recent_public_trades.append(
                     {
+                        "seq": self._public_trade_seq,
                         "ts": int(self.current_timestamp),
                         "price": trade_price_decimal,
                     }
@@ -291,9 +298,10 @@ class ExchangeTest(ScriptStrategyBase):
                     if len(self._recent_public_trades) == 0:
                         lines.append("No recent trade updates captured yet.")
                     else:
-                        lines.append("Recent trades (live cache):")
-                        for t in list(self._recent_public_trades)[-10:]:
-                            lines.append(f"  t={t['ts']} price={t['price']}")
+                        show_n = max(1, int(self.config.public_trades_display_count))
+                        lines.append(f"Recent trades (live cache, last {show_n}):")
+                        for t in list(self._recent_public_trades)[-show_n:]:
+                            lines.append(f"  n={t['seq']} t={t['ts']} price={t['price']}")
 
             if self.config.show_public_order_book:
                 lines.append("")
