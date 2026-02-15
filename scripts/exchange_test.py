@@ -330,6 +330,49 @@ class ExchangeTest(ScriptStrategyBase):
                         for t in list(self._recent_public_trades)[-show_n:]:
                             lines.append(f"  n={t['seq']} t={t['ts']} price={t['price']}")
 
+                    # Connector-level parsed trade payload validation (the exact fields Avellaneda depends on).
+                    data_source = connector.order_book_tracker.data_source
+                    parsed_getter = getattr(data_source, "get_recent_parsed_trades", None)
+                    if callable(parsed_getter):
+                        parsed_trades = parsed_getter(self.config.trading_pair, max(1, int(self.config.public_trades_display_count)))
+                        lines.append(f"Parsed trade payloads (last {len(parsed_trades)}) [WS]:")
+                        if len(parsed_trades) == 0:
+                            lines.append("  No parsed trades available from connector data source yet.")
+                        else:
+                            ids = [str(t.get("trade_id", "")) for t in parsed_trades]
+                            unique_count = len(set(ids))
+                            lines.append(f"  trade_id unique check: {unique_count}/{len(ids)} unique")
+                            now_ts = float(self.current_timestamp)
+                            for t in parsed_trades:
+                                trade_id = str(t.get("trade_id", ""))
+                                price_raw = t.get("price")
+                                amount_raw = t.get("amount")
+                                trade_type = str(t.get("trade_type", "")).lower()
+                                ts = float(t.get("timestamp", 0) or 0)
+
+                                # Field validations expected by strategy logic.
+                                price_ok = False
+                                amount_ok = False
+                                ts_ok = False
+                                try:
+                                    price_ok = Decimal(str(price_raw)) > Decimal("0")
+                                except Exception:
+                                    price_ok = False
+                                try:
+                                    amount_ok = Decimal(str(amount_raw)) > Decimal("0")
+                                except Exception:
+                                    amount_ok = False
+                                age = now_ts - ts if ts > 0 else 999999.0
+                                ts_ok = ts > 0 and abs(age) <= 15
+                                type_ok = trade_type in {"buy", "sell"}
+                                id_ok = len(trade_id) > 0
+
+                                lines.append(
+                                    f"  id={trade_id} id_ok={id_ok} price={price_raw} price_ok={price_ok} "
+                                    f"amount={amount_raw} amount_ok={amount_ok} type={trade_type} type_ok={type_ok} "
+                                    f"ts={ts:.3f} age={age:.2f}s ts_ok={ts_ok}"
+                                )
+
             if self.config.show_public_order_book:
                 lines.append("")
                 lines.append("Public: Order Book [WS]")

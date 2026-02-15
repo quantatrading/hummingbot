@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections import defaultdict, deque
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from hummingbot.connector.exchange.cryptocom import cryptocom_constants as CONSTANTS, cryptocom_web_utils as web_utils
@@ -35,6 +36,7 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         self._domain = domain
         self._api_factory = api_factory
         self._last_book_update_id: Dict[str, int] = {}
+        self._recent_parsed_trades: Dict[str, deque] = defaultdict(lambda: deque(maxlen=200))
 
     async def get_last_traded_prices(self, trading_pairs: List[str], domain: Optional[str] = None) -> Dict[str, float]:
         return await self._connector.get_last_traded_prices(trading_pairs=trading_pairs)
@@ -291,6 +293,12 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
             return value * 1e-3
         return float(value)  # s
 
+    def get_recent_parsed_trades(self, trading_pair: str, limit: int = 50) -> List[Dict[str, Any]]:
+        trades = list(self._recent_parsed_trades.get(trading_pair, deque()))
+        if limit <= 0:
+            return trades
+        return trades[-limit:]
+
     async def _parse_trade_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
         result = raw_message.get("result", {})
         symbol = self._extract_instrument_name(result)
@@ -301,6 +309,16 @@ class CryptocomAPIOrderBookDataSource(OrderBookTrackerDataSource):
         for trade in result.get("data", []):
             trade_message = self.trade_message_from_exchange(trade, {"trading_pair": trading_pair})
             message_queue.put_nowait(trade_message)
+            trade_type = "buy" if trade_message.content["trade_type"] == float(TradeType.BUY.value) else "sell"
+            self._recent_parsed_trades[trading_pair].append(
+                {
+                    "trade_id": str(trade_message.content["trade_id"]),
+                    "price": trade_message.content["price"],
+                    "amount": trade_message.content["amount"],
+                    "trade_type": trade_type,
+                    "timestamp": float(trade_message.timestamp),
+                }
+            )
 
     async def _parse_order_book_diff_message(self, raw_message: Dict[str, Any], message_queue: asyncio.Queue):
         # Not used: Crypto.com book stream is handled as snapshots.
