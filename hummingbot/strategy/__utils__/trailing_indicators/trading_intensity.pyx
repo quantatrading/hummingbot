@@ -65,6 +65,10 @@ cdef class TradingIntensityIndicator:
         self._sampling_length = new_len
 
     @property
+    def sampling_buffer_length(self) -> int:
+        return len(self._trade_samples.keys())
+
+    @property
     def last_quotes(self) -> list:
         """A helper method to be used in unit tests"""
         return self._last_quotes

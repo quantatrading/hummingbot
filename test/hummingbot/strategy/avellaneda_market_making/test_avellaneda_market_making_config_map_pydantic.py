@@ -53,6 +53,7 @@ class AvellanedaMarketMakingConfigMapPydanticTest(unittest.TestCase):
                 "end_time": "16:00:00",
             },
             "order_amount": "10",
+            "reference_price_source": "mid_price",
             "order_optimization_enabled": "yes",
             "risk_factor": "0.5",
             "order_refresh_time": "60",

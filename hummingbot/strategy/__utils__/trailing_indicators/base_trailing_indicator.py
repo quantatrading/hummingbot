@@ -57,6 +57,10 @@ class BaseTrailingIndicator(ABC):
         return is_changed
 
     @property
+    def sampling_buffer_length(self) -> int:
+        return len(self._sampling_buffer.get_as_numpy_array())
+
+    @property
     def sampling_length(self) -> int:
         return self._sampling_buffer.length
 

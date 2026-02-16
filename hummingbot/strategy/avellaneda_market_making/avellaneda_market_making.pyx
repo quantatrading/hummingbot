@@ -680,12 +680,23 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
             else:
                 # Only if snapshots are different - for trading intensity - a market order happened
+                vol_len = self._avg_vol.sampling_buffer_length
+                vol_target = self._avg_vol.sampling_length
+                liq_len = self._trading_intensity.sampling_buffer_length
+                liq_target = self._trading_intensity.sampling_length
                 if self.c_is_algorithm_changed():
                     self._ticks_to_be_ready -= 1
                     if self._ticks_to_be_ready % 5 == 0:
-                        self.logger().info(f"Calculating volatility, estimating order book liquidity ... {self._ticks_to_be_ready} ticks to fill buffers")
+                        self.logger().info(
+                            f"Calculating volatility, estimating order book liquidity ... "
+                            f"{self._ticks_to_be_ready} ticks to fill buffers "
+                            f"(vol {vol_len}/{vol_target}, liq {liq_len}/{liq_target})"
+                        )
                 else:
-                    self.logger().info(f"Calculating volatility, estimating order book liquidity ... no trades tick")
+                    self.logger().info(
+                        f"Calculating volatility, estimating order book liquidity ... no trades tick "
+                        f"(vol {vol_len}/{vol_target}, liq {liq_len}/{liq_target})"
+                    )
         finally:
             self._last_timestamp = timestamp
 
