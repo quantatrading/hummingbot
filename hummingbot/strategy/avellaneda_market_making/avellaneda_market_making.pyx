@@ -173,10 +173,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         return self._config_map.vamp_auto_q_enabled
 
     @property
-    def vamp_target_bps(self) -> Decimal:
-        return self._config_map.vamp_target_bps
-
-    @property
     def vamp_q_min(self) -> Decimal:
         return self._config_map.vamp_q_min
 

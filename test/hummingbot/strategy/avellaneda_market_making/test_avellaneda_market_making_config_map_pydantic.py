@@ -206,12 +206,6 @@ class AvellanedaMarketMakingConfigMapPydanticTest(unittest.TestCase):
         self.assertTrue(self.config_map.vamp_auto_q_enabled)
 
         with self.assertRaises(ConfigValidationError) as e:
-            self.config_map.vamp_target_bps = "0"
-
-        error_msg = "Value error, Value must be more than 0."
-        self.assertEqual(error_msg, str(e.exception))
-
-        with self.assertRaises(ConfigValidationError) as e:
             self.config_map.vamp_q_min = "-1"
 
         error_msg = "Value error, Value cannot be less than 0."

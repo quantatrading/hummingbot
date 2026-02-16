@@ -188,14 +188,8 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
     )
     vamp_auto_q_enabled: bool = Field(
         default=False,
-        description="If enabled, derive VAMP Q from live order book depth at target bps.",
-        json_schema_extra={"prompt": "Enable auto VAMP Q from order book depth? (Yes/No)"},
-    )
-    vamp_target_bps: Decimal = Field(
-        default=Decimal("3"),
-        description="Target distance in bps from top-of-book used to derive auto VAMP Q.",
-        gt=0,
-        json_schema_extra={"prompt": "Enter VAMP auto-Q target depth in bps"},
+        description="If enabled, derive VAMP Q from full visible order book depth.",
+        json_schema_extra={"prompt": "Enable auto VAMP Q from full order book depth? (Yes/No)"},
     )
     vamp_q_min: Decimal = Field(
         default=Decimal("0"),
@@ -441,14 +435,6 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
     @classmethod
     def validate_vamp_volume(cls, v: str):
         ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
-        if ret is not None:
-            raise ValueError(ret)
-        return v
-
-    @field_validator("vamp_target_bps", mode="before")
-    @classmethod
-    def validate_vamp_target_bps(cls, v: str):
-        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=False)
         if ret is not None:
             raise ValueError(ret)
         return v
