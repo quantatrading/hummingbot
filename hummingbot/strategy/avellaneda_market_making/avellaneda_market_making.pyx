@@ -539,25 +539,17 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         markets_columns = ["Exchange", "Market", "Best Bid", "Best Ask", "MidPrice"]
         if use_vamp:
             markets_columns.append("VampMidPrice")
-        markets_columns.extend(["RefPrice", "RefSource"])
-        markets_columns.append('Reservation Price')
-        markets_columns.append('Optimal Spread')
         market_books = [(self._market_info.market, self._market_info.trading_pair)]
         for market, trading_pair in market_books:
             bid_price = market.get_price(trading_pair, False)
             ask_price = market.get_price(trading_pair, True)
             mid_price = self.get_mid_price()
-            ref_price = self.get_price()
             row = [
                 market.display_name,
                 trading_pair,
                 float(bid_price),
                 float(ask_price),
                 float(mid_price),
-                float(ref_price),
-                self.reference_price_source,
-                round(self._reservation_price, 5),
-                round(self._optimal_spread, 5),
             ]
             if use_vamp:
                 row.insert(5, float(self.c_get_vamp_price()))
@@ -574,6 +566,13 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
         markets_df = self.market_status_data_frame([self._market_info])
         lines.extend(["", "  Markets:"] + ["    " + line for line in markets_df.to_string(index=False).split("\n")])
+        lines.extend([
+            "    "
+            f"RefPrice: {float(self.get_price()):.6f} | "
+            f"RefSource: {self.reference_price_source} | "
+            f"Reservation Price: {round(self._reservation_price, 5)} | "
+            f"Optimal Spread: {round(self._optimal_spread, 5)}"
+        ])
 
         assets_df = map_df_to_str(self.pure_mm_assets_df(True))
         first_col_length = max(*assets_df[0].apply(len))
