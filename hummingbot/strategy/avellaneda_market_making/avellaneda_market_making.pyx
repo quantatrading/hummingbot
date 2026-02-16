@@ -379,24 +379,12 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
     cdef object c_get_auto_vamp_volume(self):
         cdef:
             object market = self._market_info.market
-            str trading_pair = self._market_info.trading_pair
-            object best_bid
-            object best_ask
-            object bps_fraction
-            object bid_price_limit
-            object ask_price_limit
             object bid_q
             object ask_q
         try:
-            best_bid = market.get_price(trading_pair, False)
-            best_ask = market.get_price(trading_pair, True)
-            if best_bid is None or best_ask is None or best_bid <= s_decimal_zero or best_ask <= s_decimal_zero:
-                return s_decimal_neg_one
-            bps_fraction = self.vamp_target_bps / Decimal("10000")
-            bid_price_limit = best_bid * (Decimal("1") - bps_fraction)
-            ask_price_limit = best_ask * (Decimal("1") + bps_fraction)
-            bid_q = self.c_cumulative_book_amount_for_price_limit(False, bid_price_limit)
-            ask_q = self.c_cumulative_book_amount_for_price_limit(True, ask_price_limit)
+            # Auto-Q horizon is the full visible book depth on each side.
+            bid_q = self.c_cumulative_book_amount_for_price_limit(False, None)
+            ask_q = self.c_cumulative_book_amount_for_price_limit(True, None)
             if bid_q <= s_decimal_zero or ask_q <= s_decimal_zero:
                 return s_decimal_neg_one
             return min(bid_q, ask_q)
@@ -416,12 +404,13 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             row_amount = Decimal(str(row.amount))
             if row_amount <= s_decimal_zero:
                 continue
-            if is_buy:
-                if row_price > price_limit:
-                    break
-            else:
-                if row_price < price_limit:
-                    break
+            if price_limit is not None:
+                if is_buy:
+                    if row_price > price_limit:
+                        break
+                else:
+                    if row_price < price_limit:
+                        break
             cumulative += row_amount
         return cumulative
 
