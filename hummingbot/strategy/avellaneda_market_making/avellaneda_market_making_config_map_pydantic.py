@@ -172,6 +172,20 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
             "prompt_on_new": True,
         }
     )
+    reference_price_source: str = Field(
+        default="mid_price",
+        description="Reference price source used as s in Avellaneda equations (mid_price or vamp).",
+        json_schema_extra={
+            "prompt": "Select reference price source (mid_price/vamp)",
+            "prompt_on_new": True,
+        },
+    )
+    vamp_volume: Decimal = Field(
+        default=Decimal("0"),
+        description="Base volume used to compute VAMP. Set 0 to use order_amount.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter VAMP volume in base asset units (0 uses order_amount)"},
+    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -385,6 +399,23 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
     @classmethod
     def validate_decimal_zero_or_above(cls, v: str):
         """Used for client-friendly error output."""
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("reference_price_source", mode="before")
+    @classmethod
+    def validate_reference_price_source(cls, v: str):
+        value = str(v).lower()
+        valid_values = {"mid_price", "vamp"}
+        if value not in valid_values:
+            raise ValueError("Invalid price source, please choose value from ['mid_price', 'vamp']")
+        return value
+
+    @field_validator("vamp_volume", mode="before")
+    @classmethod
+    def validate_vamp_volume(cls, v: str):
         ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
         if ret is not None:
             raise ValueError(ret)

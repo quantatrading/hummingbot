@@ -186,6 +186,21 @@ class AvellanedaMarketMakingConfigMapPydanticTest(unittest.TestCase):
         model.hanging_orders_cancel_pct = "3"
         self.assertEqual(3, model.hanging_orders_cancel_pct)
 
+        with self.assertRaises(ConfigValidationError) as e:
+            self.config_map.reference_price_source = "invalid"
+
+        error_msg = "Value error, Invalid price source, please choose value from ['mid_price', 'vamp']"
+        self.assertEqual(error_msg, str(e.exception))
+
+        self.config_map.reference_price_source = "vamp"
+        self.assertEqual("vamp", self.config_map.reference_price_source)
+
+        with self.assertRaises(ConfigValidationError) as e:
+            self.config_map.vamp_volume = "-1"
+
+        error_msg = "Value error, Value cannot be less than 0."
+        self.assertEqual(error_msg, str(e.exception))
+
     def test_load_configs_from_yaml(self):
         cur_dir = Path(__file__).parent
         f_path = cur_dir / "test_config.yml"

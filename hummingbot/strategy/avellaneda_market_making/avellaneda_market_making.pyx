@@ -165,6 +165,17 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         return self._config_map.order_refresh_tolerance_pct / Decimal('100')
 
     @property
+    def reference_price_source(self) -> str:
+        return self._config_map.reference_price_source
+
+    @property
+    def vamp_volume(self) -> Decimal:
+        configured_volume = self._config_map.vamp_volume
+        if configured_volume is not None and configured_volume > Decimal("0"):
+            return configured_volume
+        return self.order_amount
+
+    @property
     def order_amount(self) -> Decimal:
         return self._config_map.order_amount
 
@@ -303,6 +314,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._end_time = value
 
     def get_price(self) -> float:
+        if self.reference_price_source == "vamp":
+            return self.c_get_vamp_price()
         return self.get_mid_price()
 
     def get_last_price(self) -> float:
@@ -313,6 +326,30 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
     cdef object c_get_mid_price(self):
         return self._price_delegate.get_price_by_type(PriceType.MidPrice)
+
+    cdef object c_get_vamp_price(self):
+        cdef:
+            object volume = self.vamp_volume
+            object bid_vwap = s_decimal_neg_one
+            object ask_vwap = s_decimal_neg_one
+            object vamp = s_decimal_neg_one
+        try:
+            bid_vwap = self._market_info.get_vwap_for_volume(False, volume).result_price
+            ask_vwap = self._market_info.get_vwap_for_volume(True, volume).result_price
+            if (
+                bid_vwap is None
+                or ask_vwap is None
+                or (hasattr(bid_vwap, "is_nan") and bid_vwap.is_nan())
+                or (hasattr(ask_vwap, "is_nan") and ask_vwap.is_nan())
+                or bid_vwap <= s_decimal_zero
+                or ask_vwap <= s_decimal_zero
+            ):
+                return self.c_get_mid_price()
+            vamp = (bid_vwap + ask_vwap) / Decimal("2")
+            return vamp if vamp > s_decimal_zero else self.c_get_mid_price()
+        except Exception:
+            # If requested volume cannot be priced from the book, fallback to classic mid price.
+            return self.c_get_mid_price()
 
     @property
     def market_info_to_active_orders(self) -> Dict[MarketTradingPairTuple, List[LimitOrder]]:
@@ -437,7 +474,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
     def pure_mm_assets_df(self, to_show_current_pct: bool) -> pd.DataFrame:
         market, trading_pair, base_asset, quote_asset = self._market_info
-        price = self._price_delegate.get_price_by_type(PriceType.MidPrice)
+        price = self.get_price()
         base_balance = float(market.get_balance(base_asset))
         quote_balance = float(market.get_balance(quote_asset))
         available_base_balance = float(market.get_available_balance(base_asset))
@@ -497,24 +534,34 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         return pd.DataFrame(data=data, columns=columns)
 
     def market_status_data_frame(self, market_trading_pair_tuples: List[MarketTradingPairTuple]) -> pd.DataFrame:
+        use_vamp = self.reference_price_source == "vamp"
         markets_data = []
-        markets_columns = ["Exchange", "Market", "Best Bid", "Best Ask", f"MidPrice"]
+        markets_columns = ["Exchange", "Market", "Best Bid", "Best Ask", "MidPrice"]
+        if use_vamp:
+            markets_columns.append("VampMidPrice")
+        markets_columns.extend(["RefPrice", "RefSource"])
         markets_columns.append('Reservation Price')
         markets_columns.append('Optimal Spread')
         market_books = [(self._market_info.market, self._market_info.trading_pair)]
         for market, trading_pair in market_books:
             bid_price = market.get_price(trading_pair, False)
             ask_price = market.get_price(trading_pair, True)
+            mid_price = self.get_mid_price()
             ref_price = self.get_price()
-            markets_data.append([
+            row = [
                 market.display_name,
                 trading_pair,
                 float(bid_price),
                 float(ask_price),
+                float(mid_price),
                 float(ref_price),
+                self.reference_price_source,
                 round(self._reservation_price, 5),
                 round(self._optimal_spread, 5),
-            ])
+            ]
+            if use_vamp:
+                row.insert(5, float(self.c_get_vamp_price()))
+            markets_data.append(row)
         return pd.DataFrame(data=markets_data, columns=markets_columns).replace(np.nan, '', regex=True)
 
     def format_status(self) -> str:

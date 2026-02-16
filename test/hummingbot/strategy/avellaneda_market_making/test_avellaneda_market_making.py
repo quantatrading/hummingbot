@@ -516,8 +516,39 @@ class AvellanedaMarketMakingUnitTests(unittest.TestCase):
         self.assertEqual(self.trading_pair, self.strategy.trading_pair)
 
     def test_get_price(self):
-        # Avellaneda Strategy get_price is simply a wrapper for MarketTradingPairTuple.get_mid_price()
+        # Default reference source is classic top-of-book mid.
         self.assertEqual(self.market_info.get_mid_price(), self.strategy.get_price())
+
+    def test_get_price_with_vamp_source(self):
+        self.config_map.reference_price_source = "vamp"
+        self.config_map.vamp_volume = Decimal("15")
+
+        ob_bids: List[OrderBookRow] = [
+            OrderBookRow(Decimal("100"), Decimal("10"), 2),
+            OrderBookRow(Decimal("99"), Decimal("20"), 2),
+        ]
+        ob_asks: List[OrderBookRow] = [
+            OrderBookRow(Decimal("102"), Decimal("5"), 2),
+            OrderBookRow(Decimal("103"), Decimal("20"), 2),
+        ]
+        self.market.order_books[self.trading_pair].apply_snapshot(ob_bids, ob_asks, 2)
+
+        expected_bid_vwap = (Decimal("100") * Decimal("10") + Decimal("99") * Decimal("5")) / Decimal("15")
+        expected_ask_vwap = (Decimal("102") * Decimal("5") + Decimal("103") * Decimal("10")) / Decimal("15")
+        expected_vamp = (expected_bid_vwap + expected_ask_vwap) / Decimal("2")
+
+        self.assertAlmostEqual(float(expected_vamp), float(self.strategy.get_price()), places=7)
+        self.assertNotEqual(self.market_info.get_mid_price(), self.strategy.get_price())
+
+    def test_get_price_with_vamp_falls_back_to_mid_when_depth_is_insufficient(self):
+        self.config_map.reference_price_source = "vamp"
+        self.config_map.vamp_volume = Decimal("1000")
+
+        ob_bids: List[OrderBookRow] = [OrderBookRow(Decimal("100"), Decimal("1"), 2)]
+        ob_asks: List[OrderBookRow] = [OrderBookRow(Decimal("102"), Decimal("1"), 2)]
+        self.market.order_books[self.trading_pair].apply_snapshot(ob_bids, ob_asks, 2)
+
+        self.assertEqual(self.strategy.get_mid_price(), self.strategy.get_price())
 
     def test_get_mid_price(self):
         self.assertEqual(self.market_info.get_mid_price(), self.strategy.get_mid_price())
