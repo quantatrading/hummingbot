@@ -186,6 +186,29 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         ge=0,
         json_schema_extra={"prompt": "Enter VAMP volume in base asset units (0 uses order_amount)"},
     )
+    vamp_auto_q_enabled: bool = Field(
+        default=False,
+        description="If enabled, derive VAMP Q from live order book depth at target bps.",
+        json_schema_extra={"prompt": "Enable auto VAMP Q from order book depth? (Yes/No)"},
+    )
+    vamp_target_bps: Decimal = Field(
+        default=Decimal("3"),
+        description="Target distance in bps from top-of-book used to derive auto VAMP Q.",
+        gt=0,
+        json_schema_extra={"prompt": "Enter VAMP auto-Q target depth in bps"},
+    )
+    vamp_q_min: Decimal = Field(
+        default=Decimal("0"),
+        description="Optional minimum Q clamp for auto VAMP Q (0 disables min clamp).",
+        ge=0,
+        json_schema_extra={"prompt": "Enter minimum auto VAMP Q (0 disables)"},
+    )
+    vamp_q_max: Decimal = Field(
+        default=Decimal("0"),
+        description="Optional maximum Q clamp for auto VAMP Q (0 disables max clamp).",
+        ge=0,
+        json_schema_extra={"prompt": "Enter maximum auto VAMP Q (0 disables)"},
+    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -361,6 +384,7 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "order_optimization_enabled",
         "add_transaction_costs",
         "should_wait_order_cancel_confirmation",
+        "vamp_auto_q_enabled",
         mode="before")
     @classmethod
     def validate_bool(cls, v: str):
@@ -416,6 +440,22 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
     @field_validator("vamp_volume", mode="before")
     @classmethod
     def validate_vamp_volume(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("vamp_target_bps", mode="before")
+    @classmethod
+    def validate_vamp_target_bps(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=False)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("vamp_q_min", "vamp_q_max", mode="before")
+    @classmethod
+    def validate_vamp_q_bounds(cls, v: str):
         ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
         if ret is not None:
             raise ValueError(ret)

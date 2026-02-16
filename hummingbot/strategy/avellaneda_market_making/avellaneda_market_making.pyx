@@ -169,8 +169,33 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         return self._config_map.reference_price_source
 
     @property
+    def vamp_auto_q_enabled(self) -> bool:
+        return self._config_map.vamp_auto_q_enabled
+
+    @property
+    def vamp_target_bps(self) -> Decimal:
+        return self._config_map.vamp_target_bps
+
+    @property
+    def vamp_q_min(self) -> Decimal:
+        return self._config_map.vamp_q_min
+
+    @property
+    def vamp_q_max(self) -> Decimal:
+        return self._config_map.vamp_q_max
+
+    @property
     def vamp_volume(self) -> Decimal:
         configured_volume = self._config_map.vamp_volume
+        if self.vamp_auto_q_enabled:
+            auto_volume = self.c_get_auto_vamp_volume()
+            if auto_volume is not None and auto_volume > s_decimal_zero:
+                if self.vamp_q_min > s_decimal_zero:
+                    auto_volume = max(self.vamp_q_min, auto_volume)
+                if self.vamp_q_max > s_decimal_zero:
+                    auto_volume = min(self.vamp_q_max, auto_volume)
+                if auto_volume > s_decimal_zero:
+                    return auto_volume
         if configured_volume is not None and configured_volume > Decimal("0"):
             return configured_volume
         return self.order_amount
@@ -350,6 +375,55 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         except Exception:
             # If requested volume cannot be priced from the book, fallback to classic mid price.
             return self.c_get_mid_price()
+
+    cdef object c_get_auto_vamp_volume(self):
+        cdef:
+            object market = self._market_info.market
+            str trading_pair = self._market_info.trading_pair
+            object best_bid
+            object best_ask
+            object bps_fraction
+            object bid_price_limit
+            object ask_price_limit
+            object bid_q
+            object ask_q
+        try:
+            best_bid = market.get_price(trading_pair, False)
+            best_ask = market.get_price(trading_pair, True)
+            if best_bid is None or best_ask is None or best_bid <= s_decimal_zero or best_ask <= s_decimal_zero:
+                return s_decimal_neg_one
+            bps_fraction = self.vamp_target_bps / Decimal("10000")
+            bid_price_limit = best_bid * (Decimal("1") - bps_fraction)
+            ask_price_limit = best_ask * (Decimal("1") + bps_fraction)
+            bid_q = self.c_cumulative_book_amount_for_price_limit(False, bid_price_limit)
+            ask_q = self.c_cumulative_book_amount_for_price_limit(True, ask_price_limit)
+            if bid_q <= s_decimal_zero or ask_q <= s_decimal_zero:
+                return s_decimal_neg_one
+            return min(bid_q, ask_q)
+        except Exception:
+            return s_decimal_neg_one
+
+    cdef object c_cumulative_book_amount_for_price_limit(self, bint is_buy, object price_limit):
+        cdef:
+            object cumulative = s_decimal_zero
+            object entries
+            object row
+            object row_price
+            object row_amount
+        entries = self._market_info.order_book_ask_entries() if is_buy else self._market_info.order_book_bid_entries()
+        for row in entries:
+            row_price = Decimal(str(row.price))
+            row_amount = Decimal(str(row.amount))
+            if row_amount <= s_decimal_zero:
+                continue
+            if is_buy:
+                if row_price > price_limit:
+                    break
+            else:
+                if row_price < price_limit:
+                    break
+            cumulative += row_amount
+        return cumulative
 
     @property
     def market_info_to_active_orders(self) -> Dict[MarketTradingPairTuple, List[LimitOrder]]:
@@ -570,6 +644,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             "    "
             f"RefPrice: {float(self.get_price()):.6f} | "
             f"RefSource: {self.reference_price_source} | "
+            f"VampQ: {self.vamp_volume} | "
             f"Reservation Price: {round(self._reservation_price, 5)} | "
             f"Optimal Spread: {round(self._optimal_spread, 5)}"
         ])

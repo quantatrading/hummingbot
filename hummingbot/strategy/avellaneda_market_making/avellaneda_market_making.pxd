@@ -56,6 +56,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
     cdef object c_get_mid_price(self)
     cdef object c_get_vamp_price(self)
+    cdef object c_get_auto_vamp_volume(self)
+    cdef object c_cumulative_book_amount_for_price_limit(self, bint is_buy, object price_limit)
     cdef _create_proposal_based_on_order_levels(self)
     cdef _create_proposal_based_on_order_override(self)
     cdef _create_basic_proposal(self)
