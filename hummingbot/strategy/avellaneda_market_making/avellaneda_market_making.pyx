@@ -630,17 +630,31 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         warning_lines.extend(self.network_warning([self._market_info]))
 
         markets_df = self.market_status_data_frame([self._market_info])
-        lines.extend(["", "  Markets:"] + ["    " + line for line in markets_df.to_string(index=False).split("\n")])
+        market_columns = [str(col) for col in markets_df.columns]
+        market_rows = [[str(cell) for cell in row] for row in markets_df.values.tolist()]
+        market_col_widths = [
+            max(len(market_columns[i]), max((len(row[i]) for row in market_rows), default=0))
+            for i in range(len(market_columns))
+        ]
+        markets_header = "  ".join(
+            market_columns[i].center(market_col_widths[i]) for i in range(len(market_columns))
+        )
+        markets_rows = [
+            "  ".join(row[i].center(market_col_widths[i]) for i in range(len(market_columns)))
+            for row in market_rows
+        ]
+        lines.extend(["", "  Markets:", "    " + markets_header] + ["    " + line for line in markets_rows])
         lines.extend([""])
         market, trading_pair, _, _ = self._market_info
         ref_price = market.quantize_order_price(trading_pair, Decimal(str(self.get_price())))
         ref_price_quantum = market.get_order_price_quantum(trading_pair, ref_price)
         ref_price_decimals = max(0, -ref_price_quantum.as_tuple().exponent)
+        vamp_q_display = f"{Decimal(str(self.vamp_volume)):.4f}"
         ref_metrics_df = pd.DataFrame(
             data=[[
                 f"{ref_price:.{ref_price_decimals}f}",
                 self.reference_price_source,
-                round(float(self.vamp_volume), 6),
+                vamp_q_display,
                 round(self._reservation_price, 5),
                 round(self._optimal_spread, 5),
             ]],
