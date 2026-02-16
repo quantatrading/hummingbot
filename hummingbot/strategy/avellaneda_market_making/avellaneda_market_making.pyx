@@ -625,14 +625,17 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
         markets_df = self.market_status_data_frame([self._market_info])
         lines.extend(["", "  Markets:"] + ["    " + line for line in markets_df.to_string(index=False).split("\n")])
-        lines.extend([
-            "    "
-            f"RefPrice: {float(self.get_price()):.6f} | "
-            f"RefSource: {self.reference_price_source} | "
-            f"VampQ: {self.vamp_volume} | "
-            f"Reservation Price: {round(self._reservation_price, 5)} | "
-            f"Optimal Spread: {round(self._optimal_spread, 5)}"
-        ])
+        ref_metrics_df = pd.DataFrame(
+            data=[[
+                round(float(self.get_price()), 6),
+                self.reference_price_source,
+                round(float(self.vamp_volume), 6),
+                round(self._reservation_price, 5),
+                round(self._optimal_spread, 5),
+            ]],
+            columns=["RefPrice", "RefSource", "VampQ", "Reservation Price", "Optimal Spread"],
+        )
+        lines.extend(["    " + line for line in ref_metrics_df.to_string(index=False).split("\n")])
 
         assets_df = map_df_to_str(self.pure_mm_assets_df(True))
         first_col_length = max(*assets_df[0].apply(len))
