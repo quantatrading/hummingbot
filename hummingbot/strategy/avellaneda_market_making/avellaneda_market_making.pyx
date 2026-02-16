@@ -603,15 +603,21 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             bid_price = market.get_price(trading_pair, False)
             ask_price = market.get_price(trading_pair, True)
             mid_price = self.get_mid_price()
+            price_quantum = market.get_order_price_quantum(trading_pair, bid_price)
+            price_decimals = max(0, -price_quantum.as_tuple().exponent)
+            bid_price = market.quantize_order_price(trading_pair, Decimal(str(bid_price)))
+            ask_price = market.quantize_order_price(trading_pair, Decimal(str(ask_price)))
+            mid_price = market.quantize_order_price(trading_pair, Decimal(str(mid_price)))
             row = [
                 market.display_name,
                 trading_pair,
-                float(bid_price),
-                float(ask_price),
-                float(mid_price),
+                f"{bid_price:.{price_decimals}f}",
+                f"{ask_price:.{price_decimals}f}",
+                f"{mid_price:.{price_decimals}f}",
             ]
             if use_vamp:
-                row.insert(5, float(self.c_get_vamp_price()))
+                vamp_price = market.quantize_order_price(trading_pair, Decimal(str(self.c_get_vamp_price())))
+                row.insert(5, f"{vamp_price:.{price_decimals}f}")
             markets_data.append(row)
         return pd.DataFrame(data=markets_data, columns=markets_columns).replace(np.nan, '', regex=True)
 
@@ -625,9 +631,14 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
         markets_df = self.market_status_data_frame([self._market_info])
         lines.extend(["", "  Markets:"] + ["    " + line for line in markets_df.to_string(index=False).split("\n")])
+        lines.extend([""])
+        market, trading_pair, _, _ = self._market_info
+        ref_price = market.quantize_order_price(trading_pair, Decimal(str(self.get_price())))
+        ref_price_quantum = market.get_order_price_quantum(trading_pair, ref_price)
+        ref_price_decimals = max(0, -ref_price_quantum.as_tuple().exponent)
         ref_metrics_df = pd.DataFrame(
             data=[[
-                round(float(self.get_price()), 6),
+                f"{ref_price:.{ref_price_decimals}f}",
                 self.reference_price_source,
                 round(float(self.vamp_volume), 6),
                 round(self._reservation_price, 5),
