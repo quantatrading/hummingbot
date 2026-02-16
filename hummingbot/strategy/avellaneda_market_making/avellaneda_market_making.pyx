@@ -546,7 +546,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             ["", base_asset, quote_asset],
             ["Total Balance", round(base_balance, 4), round(quote_balance, 4)],
             ["Available Balance", round(available_base_balance, 4), round(available_quote_balance, 4)],
-            [f"Current Value ({quote_asset})", round(base_value, 4), round(quote_balance, 4)]
+            [f"Current Value ({quote_asset})", f"{base_value:.4f}", f"{quote_balance:.4f}"]
         ]
         if to_show_current_pct:
             data.append(["Current %", f"{base_ratio:.1%}", f"{quote_ratio:.1%}"])
