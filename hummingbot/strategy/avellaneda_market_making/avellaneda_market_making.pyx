@@ -1056,8 +1056,10 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             k_bid = self._kappa
             k_ask = self._kappa
             if bool(self._config_map.side_intensity_enabled) and self._side_intensity_metrics is not None:
-                k_bid = Decimal(str(self._side_intensity_metrics.k_bid))
-                k_ask = Decimal(str(self._side_intensity_metrics.k_ask))
+                if self._side_intensity_metrics.e_bid >= int(self._config_map.side_intensity_min_events):
+                    k_bid = Decimal(str(self._side_intensity_metrics.k_bid))
+                if self._side_intensity_metrics.e_ask >= int(self._config_map.side_intensity_min_events):
+                    k_ask = Decimal(str(self._side_intensity_metrics.k_ask))
 
             # Method 1: side-specific offsets from same Avellaneda structure with k_b/k_a.
             delta_common = self.gamma * vol * time_left_fraction / Decimal("2")

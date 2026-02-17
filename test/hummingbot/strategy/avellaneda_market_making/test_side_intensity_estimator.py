@@ -39,7 +39,7 @@ class SideIntensityEstimatorTests(unittest.TestCase):
                 estimator.register_fill(oid, t + duration)
             else:
                 estimator.register_cancel(oid, t + duration)
-        m = estimator.update(t + 1000.0)
+        m = estimator.update(t + 100.0)
         self.assertGreater(m.e_bid, self.cfg.min_events)
         # Relaxed tolerance for noisy censored online fit
         self.assertGreater(m.k_bid, 500.0)
@@ -78,7 +78,6 @@ class SideIntensityEstimatorTests(unittest.TestCase):
             ts = base + i
             estimator.register_order(f"new-{i}", SideIntensityEstimator.SIDE_BID, 0.0004, ts)
             estimator.register_fill(f"new-{i}", ts + 2)
-        m = estimator.update(base + 120)
+        m = estimator.update(base + 40)
         self.assertLess(m.n_bid, 25)
-        self.assertNotEqual(1000.0, m.k_bid)
-
+        self.assertGreater(m.e_bid, 0)

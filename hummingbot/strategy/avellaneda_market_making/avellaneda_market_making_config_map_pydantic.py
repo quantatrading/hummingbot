@@ -275,7 +275,7 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         json_schema_extra={"prompt": "Enter defensive hold duration (seconds)"},
     )
     side_intensity_enabled: bool = Field(
-        default=True,
+        default=False,
         description="Enable side-specific arrival intensity estimation (k_b, k_a).",
         json_schema_extra={"prompt": "Enable side-specific intensity estimation? (Yes/No)"},
     )

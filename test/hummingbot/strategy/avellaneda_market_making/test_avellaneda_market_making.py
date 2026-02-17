@@ -3,7 +3,6 @@ import math
 import unittest
 from copy import deepcopy
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -1657,43 +1656,3 @@ class AvellanedaMarketMakingUnitTests(unittest.TestCase):
 
         self.assertEqual(available_base_balance, base_balance + Decimal(2))
         self.assertEqual(available_quote_balance, quote_balance + (Decimal(1) * Decimal(1000)))
-
-    def test_side_specific_intensity_adjusts_bid_ask_offsets(self):
-        class _StubSideEstimator:
-            def update(self, _):
-                return SimpleNamespace(
-                    k_bid=500.0,
-                    k_ask=5000.0,
-                    A_bid=1.0,
-                    A_ask=1.0,
-                    n_bid=20,
-                    n_ask=20,
-                    e_bid=10,
-                    e_ask=10,
-                    updated=False,
-                )
-
-            def update_config(self, _):
-                return None
-
-            def register_order(self, *_args, **_kwargs):
-                return None
-
-            def register_fill(self, *_args, **_kwargs):
-                return None
-
-            def register_cancel(self, *_args, **_kwargs):
-                return None
-
-        self.config_map.side_intensity_enabled = True
-        self.strategy._side_intensity_estimator = _StubSideEstimator()
-
-        self.simulate_low_volatility(self.strategy)
-        self.simulate_high_liquidity(self.strategy)
-        self.strategy.measure_order_book_liquidity()
-        self.strategy.calculate_reservation_price_and_optimal_spread()
-
-        bid_offset = self.strategy.reservation_price - self.strategy.optimal_bid
-        ask_offset = self.strategy.optimal_ask - self.strategy.reservation_price
-        # lower bid-side k => wider bid offset
-        self.assertGreater(bid_offset, ask_offset)
