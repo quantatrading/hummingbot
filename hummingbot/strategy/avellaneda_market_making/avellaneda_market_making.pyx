@@ -33,6 +33,7 @@ from hummingbot.strategy.avellaneda_market_making.avellaneda_market_making_confi
     TrackHangingOrdersModel,
 )
 from hummingbot.strategy.avellaneda_market_making.drift_regime import DriftRegimeConfig, DriftRegimeEstimator
+from hummingbot.strategy.avellaneda_market_making.side_intensity_estimator import SideIntensityConfig, SideIntensityEstimator
 from hummingbot.strategy.conditional_execution_state import (
     RunAlwaysExecutionState,
     RunInTimeConditionalExecutionState
@@ -122,6 +123,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._drift_regime = None
         self._drift_metrics = None
         self._drift_last_log_ts = 0
+        self._side_intensity_estimator = None
+        self._side_intensity_metrics = None
+        self._side_intensity_last_log_ts = 0
+        self._last_delta_bid = s_decimal_zero
+        self._last_delta_ask = s_decimal_zero
         self._debug_csv_path = debug_csv_path
         self._is_debug = is_debug
         try:
@@ -133,6 +139,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self.get_config_map_execution_mode()
         self.get_config_map_hanging_orders()
         self._drift_regime = DriftRegimeEstimator(self._drift_config_from_map())
+        self._side_intensity_estimator = SideIntensityEstimator(self._side_intensity_config_from_map(), k_initial=float(self._kappa or 100), a_initial=1.0)
 
     def all_markets_ready(self):
         return all([market.ready for market in self._sb_markets])
@@ -456,6 +463,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self.get_config_map_indicators()
         if self._drift_regime is not None:
             self._drift_regime.update_config(self._drift_config_from_map())
+        if self._side_intensity_estimator is not None:
+            self._side_intensity_estimator.update_config(self._side_intensity_config_from_map())
 
     def _drift_config_from_map(self):
         return DriftRegimeConfig(
@@ -471,6 +480,23 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             defensive_bias_max_bps=float(self._config_map.defensive_bias_max_bps),
             defensive_hold_secs=int(self._config_map.defensive_hold_secs),
         )
+
+    def _side_intensity_config_from_map(self):
+        return SideIntensityConfig(
+            window_secs=int(self._config_map.side_intensity_window_secs),
+            update_interval_secs=int(self._config_map.side_intensity_update_interval_secs),
+            smoothing_beta=float(self._config_map.side_intensity_smoothing_beta),
+            k_min=float(self._config_map.side_intensity_k_min),
+            k_max=float(self._config_map.side_intensity_k_max),
+            min_events=int(self._config_map.side_intensity_min_events),
+            use_censoring=bool(self._config_map.side_intensity_use_censoring),
+        )
+
+    def _side_delta_from_prices(self, order_price: Decimal, reservation_price: Decimal):
+        if self._config_map.side_intensity_delta_mode == "absolute_price":
+            return abs(order_price - reservation_price)
+        denom = abs(reservation_price) if reservation_price != s_decimal_zero else s_decimal_one
+        return abs(order_price - reservation_price) / denom
 
     def get_config_map_execution_mode(self):
         try:
@@ -989,16 +1015,61 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                         f"inventory_risk_quote={inventory_risk_quote:.4f}"
                     )
 
-            self._optimal_spread = self.gamma * vol * time_left_fraction
-            self._optimal_spread += 2 * Decimal(1 + self.gamma / self._kappa).ln() / self.gamma
+            # Update side-specific intensity estimates from observed placed->filled/canceled durations.
+            if bool(self._config_map.side_intensity_enabled) and self._side_intensity_estimator is not None:
+                self._side_intensity_metrics = self._side_intensity_estimator.update(float(self._current_timestamp))
+                if (
+                    bool(self._config_map.side_intensity_debug_logging)
+                    and self._side_intensity_metrics is not None
+                    and self._side_intensity_metrics.updated
+                ):
+                    self.logger().info(
+                        "Side intensity refit: "
+                        f"k_b={self._side_intensity_metrics.k_bid:.4f} k_a={self._side_intensity_metrics.k_ask:.4f} "
+                        f"A_b={self._side_intensity_metrics.A_bid:.6f} A_a={self._side_intensity_metrics.A_ask:.6f} "
+                        f"n_b={self._side_intensity_metrics.n_bid} n_a={self._side_intensity_metrics.n_ask} "
+                        f"e_b={self._side_intensity_metrics.e_bid} e_a={self._side_intensity_metrics.e_ask}"
+                    )
+
+            k_bid = self._kappa
+            k_ask = self._kappa
+            if bool(self._config_map.side_intensity_enabled) and self._side_intensity_metrics is not None:
+                k_bid = Decimal(str(self._side_intensity_metrics.k_bid))
+                k_ask = Decimal(str(self._side_intensity_metrics.k_ask))
+
+            # Method 1: side-specific offsets from same Avellaneda structure with k_b/k_a.
+            delta_common = self.gamma * vol * time_left_fraction / Decimal("2")
+            delta_bid = delta_common + Decimal(s_decimal_one + self.gamma / k_bid).ln() / self.gamma
+            delta_ask = delta_common + Decimal(s_decimal_one + self.gamma / k_ask).ln() / self.gamma
+            self._last_delta_bid = delta_bid
+            self._last_delta_ask = delta_ask
+            self._optimal_spread = delta_bid + delta_ask
 
             min_spread = price / 100 * Decimal(str(self._config_map.min_spread))
 
             max_limit_bid = price - min_spread / 2
             min_limit_ask = price + min_spread / 2
 
-            self._optimal_ask = max(self._reservation_price + self._optimal_spread / 2, min_limit_ask)
-            self._optimal_bid = min(self._reservation_price - self._optimal_spread / 2, max_limit_bid)
+            self._optimal_ask = max(self._reservation_price + delta_ask, min_limit_ask)
+            self._optimal_bid = min(self._reservation_price - delta_bid, max_limit_bid)
+
+            if (
+                bool(self._config_map.side_intensity_enabled)
+                and bool(self._config_map.side_intensity_debug_logging)
+                and self._side_intensity_metrics is not None
+                and (self._current_timestamp - self._side_intensity_last_log_ts) >= 60
+            ):
+                self._side_intensity_last_log_ts = self._current_timestamp
+                self.logger().info(
+                    "Side intensity telemetry: "
+                    f"k_b={self._side_intensity_metrics.k_bid:.4f} k_a={self._side_intensity_metrics.k_ask:.4f} "
+                    f"A_b={self._side_intensity_metrics.A_bid:.6f} A_a={self._side_intensity_metrics.A_ask:.6f} "
+                    f"n_b={self._side_intensity_metrics.n_bid} n_a={self._side_intensity_metrics.n_ask} "
+                    f"e_b={self._side_intensity_metrics.e_bid} e_a={self._side_intensity_metrics.e_ask} "
+                    f"delta_b={delta_bid:.10f} delta_a={delta_ask:.10f} "
+                    f"reservation_price={self._reservation_price:.10f} "
+                    f"net_inventory_base={net_base_inventory:.8f} inventory_risk_quote={inventory_risk_quote:.4f}"
+                )
 
             # This is not what the algorithm will use as proposed bid and ask. This is just the raw output.
             # Optimal bid and optimal ask prices will be used
@@ -1405,6 +1476,9 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         if limit_order_record is None:
             return
 
+        if bool(self._config_map.side_intensity_enabled) and self._side_intensity_estimator is not None:
+            self._side_intensity_estimator.register_fill(order_id, float(self._current_timestamp))
+
         # Continue only if the order is not a hanging order
         if (not self._hanging_orders_tracker.is_order_id_in_hanging_orders(order_id)
                 and not self.hanging_orders_tracker.is_order_id_in_completed_hanging_orders(order_id)):
@@ -1432,6 +1506,18 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 f"{limit_order_record.quantity} {limit_order_record.base_currency} @ "
                 f"{limit_order_record.price} {limit_order_record.quote_currency} is filled."
             )
+
+    cdef c_did_cancel_order(self, object cancelled_event):
+        cdef:
+            str order_id = getattr(cancelled_event, "order_id", "")
+        if bool(self._config_map.side_intensity_enabled) and self._side_intensity_estimator is not None and len(order_id) > 0:
+            self._side_intensity_estimator.register_cancel(order_id, float(self._current_timestamp))
+
+    cdef c_did_fail_order(self, object order_failed_event):
+        cdef:
+            str order_id = getattr(order_failed_event, "order_id", "")
+        if bool(self._config_map.side_intensity_enabled) and self._side_intensity_estimator is not None and len(order_id) > 0:
+            self._side_intensity_estimator.register_cancel(order_id, float(self._current_timestamp))
 
     cdef bint c_is_within_tolerance(self, list current_prices, list proposal_prices):
         if len(current_prices) != len(proposal_prices):
@@ -1529,6 +1615,19 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                     expiration_seconds=expiration_seconds
                 )
                 orders_created = True
+                if (
+                    bool(self._config_map.side_intensity_enabled)
+                    and self._side_intensity_estimator is not None
+                    and bid_order_id is not None
+                    and len(bid_order_id) > 0
+                ):
+                    delta_bid = self._side_delta_from_prices(Decimal(str(buy.price)), Decimal(str(self._reservation_price)))
+                    self._side_intensity_estimator.register_order(
+                        bid_order_id,
+                        "bid",
+                        float(delta_bid),
+                        float(self._current_timestamp),
+                    )
                 if idx < number_of_pairs:
                     order = next((o for o in self.active_orders if o.client_order_id == bid_order_id))
                     if order:
@@ -1552,6 +1651,19 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                     expiration_seconds=expiration_seconds
                 )
                 orders_created = True
+                if (
+                    bool(self._config_map.side_intensity_enabled)
+                    and self._side_intensity_estimator is not None
+                    and ask_order_id is not None
+                    and len(ask_order_id) > 0
+                ):
+                    delta_ask = self._side_delta_from_prices(Decimal(str(sell.price)), Decimal(str(self._reservation_price)))
+                    self._side_intensity_estimator.register_order(
+                        ask_order_id,
+                        "ask",
+                        float(delta_ask),
+                        float(self._current_timestamp),
+                    )
                 if idx < number_of_pairs:
                     order = next((o for o in self.active_orders if o.client_order_id == ask_order_id))
                     if order:

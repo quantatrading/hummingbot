@@ -274,6 +274,63 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         ge=0,
         json_schema_extra={"prompt": "Enter defensive hold duration (seconds)"},
     )
+    side_intensity_enabled: bool = Field(
+        default=True,
+        description="Enable side-specific arrival intensity estimation (k_b, k_a).",
+        json_schema_extra={"prompt": "Enable side-specific intensity estimation? (Yes/No)"},
+    )
+    side_intensity_window_secs: int = Field(
+        default=900,
+        description="Rolling window (seconds) for side intensity estimation.",
+        ge=60,
+        json_schema_extra={"prompt": "Enter side intensity window (seconds)"},
+    )
+    side_intensity_update_interval_secs: int = Field(
+        default=30,
+        description="Refit cadence (seconds) for side intensity parameters.",
+        ge=1,
+        json_schema_extra={"prompt": "Enter side intensity update interval (seconds)"},
+    )
+    side_intensity_smoothing_beta: Decimal = Field(
+        default=Decimal("0.2"),
+        description="EMA smoothing factor for side intensity updates.",
+        ge=0,
+        le=1,
+        json_schema_extra={"prompt": "Enter side intensity smoothing beta (0-1)"},
+    )
+    side_intensity_k_min: Decimal = Field(
+        default=Decimal("10"),
+        description="Lower bound for side-specific k search.",
+        gt=0,
+        json_schema_extra={"prompt": "Enter minimum side intensity k"},
+    )
+    side_intensity_k_max: Decimal = Field(
+        default=Decimal("20000"),
+        description="Upper bound for side-specific k search.",
+        gt=0,
+        json_schema_extra={"prompt": "Enter maximum side intensity k"},
+    )
+    side_intensity_min_events: int = Field(
+        default=5,
+        description="Minimum fill events per side to refit.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter minimum fill events per side"},
+    )
+    side_intensity_use_censoring: bool = Field(
+        default=True,
+        description="Use right-censoring in side intensity likelihood.",
+        json_schema_extra={"prompt": "Use censoring-aware side intensity fit? (Yes/No)"},
+    )
+    side_intensity_delta_mode: str = Field(
+        default="relative_to_r",
+        description="Delta definition for side intensity estimator.",
+        json_schema_extra={"prompt": "Select side intensity delta mode (relative_to_r/absolute_price)"},
+    )
+    side_intensity_debug_logging: bool = Field(
+        default=True,
+        description="Enable side intensity telemetry logging.",
+        json_schema_extra={"prompt": "Enable side intensity debug logging? (Yes/No)"},
+    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -451,6 +508,9 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "should_wait_order_cancel_confirmation",
         "vamp_auto_q_enabled",
         "drift_enabled",
+        "side_intensity_enabled",
+        "side_intensity_use_censoring",
+        "side_intensity_debug_logging",
         mode="before")
     @classmethod
     def validate_bool(cls, v: str):
@@ -548,6 +608,39 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
             raise ValueError(ret)
         return v
 
+    @field_validator("side_intensity_smoothing_beta", mode="before")
+    @classmethod
+    def validate_side_intensity_beta(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), max_value=Decimal("1"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("side_intensity_k_min", "side_intensity_k_max", mode="before")
+    @classmethod
+    def validate_side_intensity_k_bounds(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=False)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("side_intensity_window_secs", "side_intensity_update_interval_secs", "side_intensity_min_events", mode="before")
+    @classmethod
+    def validate_side_intensity_ints(cls, v: str):
+        ret = validate_int(v, min_value=0)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("side_intensity_delta_mode", mode="before")
+    @classmethod
+    def validate_side_intensity_delta_mode(cls, v: str):
+        value = str(v).lower()
+        valid_values = {"relative_to_r", "absolute_price"}
+        if value not in valid_values:
+            raise ValueError("Invalid side intensity delta mode, choose from ['relative_to_r', 'absolute_price']")
+        return value
+
     @field_validator("inventory_target_base_pct", mode="before")
     @classmethod
     def validate_pct_inclusive(cls, v: str):
@@ -561,5 +654,7 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
 
     @model_validator(mode="after")
     def post_validations(self):
+        if self.side_intensity_k_min >= self.side_intensity_k_max:
+            raise ValueError("side_intensity_k_min must be less than side_intensity_k_max")
         required_exchanges.add(self.exchange)
         return self

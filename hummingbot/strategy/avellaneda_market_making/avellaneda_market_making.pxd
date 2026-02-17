@@ -52,6 +52,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         object _drift_regime
         object _drift_metrics
         double _drift_last_log_ts
+        object _side_intensity_estimator
+        object _side_intensity_metrics
+        double _side_intensity_last_log_ts
+        object _last_delta_bid
+        object _last_delta_ask
         str _debug_csv_path
         object _avg_vol
         TradingIntensityIndicator _trading_intensity
@@ -71,6 +76,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
     cdef c_apply_budget_constraint(self, object proposal)
     cdef c_apply_order_optimization(self, object proposal)
     cdef c_apply_add_transaction_costs(self, object proposal)
+    cdef c_did_fail_order(self, object order_failed_event)
+    cdef c_did_cancel_order(self, object cancelled_event)
     cdef bint c_is_within_tolerance(self, list current_prices, list proposal_prices)
     cdef c_cancel_active_orders(self, object proposal)
     cdef c_cancel_active_orders_on_max_age_limit(self)
