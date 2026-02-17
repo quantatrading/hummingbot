@@ -736,6 +736,28 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                     f"    net_inventory_base={net_base_inventory:.8f} inventory_risk_quote={inventory_risk_quote:.4f}",
                 ])
 
+        if bool(self._config_map.side_intensity_enabled):
+            lines.extend(["", "  Avellaneda–Stoikov (Side Intensity):"])
+            if self._side_intensity_metrics is None:
+                lines.extend(["    side intensity not initialized yet."])
+            else:
+                side_df = pd.DataFrame(
+                    data=[[
+                        f"{Decimal(str(self._side_intensity_metrics.k_bid)):.4f}",
+                        f"{Decimal(str(self._side_intensity_metrics.k_ask)):.4f}",
+                        f"{Decimal(str(self._side_intensity_metrics.A_bid)):.6f}",
+                        f"{Decimal(str(self._side_intensity_metrics.A_ask)):.6f}",
+                        self._side_intensity_metrics.n_bid,
+                        self._side_intensity_metrics.n_ask,
+                        self._side_intensity_metrics.e_bid,
+                        self._side_intensity_metrics.e_ask,
+                        f"{Decimal(str(self._last_delta_bid)):.10f}",
+                        f"{Decimal(str(self._last_delta_ask)):.10f}",
+                    ]],
+                    columns=["k_b", "k_a", "A_b", "A_a", "n_b", "n_a", "e_b", "e_a", "δ_b", "δ_a"],
+                )
+                lines.extend(["    " + line for line in side_df.to_string(index=False).split("\n")])
+
         assets_df = map_df_to_str(self.pure_mm_assets_df(True))
         first_col_length = max(*assets_df[0].apply(len))
         df_lines = assets_df.to_string(index=False, header=False,
