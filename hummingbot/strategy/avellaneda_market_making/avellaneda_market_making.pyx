@@ -709,6 +709,28 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             else:
                 lines.extend([f"    time until end of trading cycle = N/A"])
 
+        if bool(self._config_map.drift_enabled):
+            lines.extend(["", "  Drift telemetry:"])
+            if self._drift_metrics is None:
+                lines.extend(["    drift not initialized yet."])
+            else:
+                q_target = Decimal(str(self.c_calculate_target_inventory()))
+                net_base_inventory = market.get_balance(self.base_asset) - q_target
+                ref_price_for_drift = Decimal(str(self.get_price()))
+                inventory_risk_quote = abs(net_base_inventory * ref_price_for_drift)
+                drift_term_bps = Decimal(str(self._drift_metrics.drift_term_bps))
+                drift_term_price = ref_price_for_drift * drift_term_bps / Decimal("10000")
+                reservation_before = self._reservation_price - drift_term_price
+                lines.extend([
+                    f"    ready={self._drift_metrics.ready} regime={self._drift_metrics.regime} "
+                    f"defensive_active={self._drift_metrics.defensive_active}",
+                    f"    z={self._drift_metrics.z:.4f} mu_60={self._drift_metrics.mu_60:.6E} "
+                    f"mu_300={self._drift_metrics.mu_300:.6E} sig_300={self._drift_metrics.sig_300:.6E}",
+                    f"    tau={self._drift_metrics.tau:.4f} drift_term_bps={self._drift_metrics.drift_term_bps:.4f}",
+                    f"    reservation_price_before={reservation_before:.10f} reservation_price_after={self._reservation_price:.10f}",
+                    f"    net_inventory_base={net_base_inventory:.8f} inventory_risk_quote={inventory_risk_quote:.4f}",
+                ])
+
         warning_lines.extend(self.balance_warning([self._market_info]))
 
         if len(warning_lines) > 0:
