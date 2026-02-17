@@ -203,6 +203,77 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         ge=0,
         json_schema_extra={"prompt": "Enter maximum auto VAMP Q (0 disables)"},
     )
+    drift_enabled: bool = Field(
+        default=False,
+        description="Enable non-zero drift extension in reservation price (HJB-consistent).",
+        json_schema_extra={"prompt": "Enable drift term extension? (Yes/No)"},
+    )
+    drift_z_threshold: Decimal = Field(
+        default=Decimal("0.6"),
+        description="Regime activation threshold for z-score of drift.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter drift z-score threshold"},
+    )
+    drift_confirm_secs: int = Field(
+        default=30,
+        description="Seconds a regime signal must persist before switching.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter drift confirmation window (seconds)"},
+    )
+    drift_hysteresis_secs: int = Field(
+        default=180,
+        description="Minimum seconds between regime switches.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter drift hysteresis window (seconds)"},
+    )
+    drift_kappa: Decimal = Field(
+        default=Decimal("0.25"),
+        description="Effective horizon factor: tau = drift_kappa * drift_window_short_secs.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter drift horizon factor (kappa)"},
+    )
+    drift_bias_max_bps: Decimal = Field(
+        default=Decimal("20"),
+        description="Maximum absolute drift term in bps under normal mode.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter max drift bias (bps)"},
+    )
+    drift_window_short_secs: int = Field(
+        default=60,
+        description="Short window (seconds) for mu_60.",
+        ge=1,
+        json_schema_extra={"prompt": "Enter short drift window (seconds)"},
+    )
+    drift_window_long_secs: int = Field(
+        default=300,
+        description="Long window (seconds) for mu_300 confirmation.",
+        ge=1,
+        json_schema_extra={"prompt": "Enter long drift window (seconds)"},
+    )
+    drift_window_vol_secs: int = Field(
+        default=300,
+        description="Volatility window (seconds) for sig_300.",
+        ge=1,
+        json_schema_extra={"prompt": "Enter volatility window (seconds)"},
+    )
+    inventory_risk_cap_quote: Decimal = Field(
+        default=Decimal("200"),
+        description="Inventory risk cap in quote units for defensive drift mode.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter inventory risk cap (quote)"},
+    )
+    defensive_bias_max_bps: Decimal = Field(
+        default=Decimal("35"),
+        description="Maximum absolute drift bias in bps under defensive mode.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter defensive max drift bias (bps)"},
+    )
+    defensive_hold_secs: int = Field(
+        default=300,
+        description="Seconds defensive mode stays active after trigger.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter defensive hold duration (seconds)"},
+    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -379,6 +450,7 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "add_transaction_costs",
         "should_wait_order_cancel_confirmation",
         "vamp_auto_q_enabled",
+        "drift_enabled",
         mode="before")
     @classmethod
     def validate_bool(cls, v: str):
@@ -443,6 +515,35 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
     @classmethod
     def validate_vamp_q_bounds(cls, v: str):
         ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator(
+        "drift_z_threshold",
+        "drift_kappa",
+        "drift_bias_max_bps",
+        "inventory_risk_cap_quote",
+        "defensive_bias_max_bps",
+        mode="before")
+    @classmethod
+    def validate_drift_decimals_non_negative(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator(
+        "drift_confirm_secs",
+        "drift_hysteresis_secs",
+        "drift_window_short_secs",
+        "drift_window_long_secs",
+        "drift_window_vol_secs",
+        "defensive_hold_secs",
+        mode="before")
+    @classmethod
+    def validate_drift_ints_non_negative(cls, v: str):
+        ret = validate_int(v, min_value=0)
         if ret is not None:
             raise ValueError(ret)
         return v
