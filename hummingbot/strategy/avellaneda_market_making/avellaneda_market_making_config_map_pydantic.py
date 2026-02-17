@@ -367,6 +367,53 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         gt=0,
         json_schema_extra={"prompt": "Enter A-skew epsilon"},
     )
+    inventory_gate_enabled: bool = Field(
+        default=True,
+        description="Enable inventory-aware gating on A-skew.",
+        json_schema_extra={"prompt": "Enable inventory gate on A-skew? (Yes/No)"},
+    )
+    inventory_gate_scale_pct: Decimal = Field(
+        default=Decimal("0.35"),
+        description="Scale as fraction of inventory_risk_cap_quote for gate decay.",
+        gt=0,
+        json_schema_extra={"prompt": "Enter inventory gate scale pct"},
+    )
+    inventory_gate_mode: str = Field(
+        default="exp",
+        description="Inventory gate mode.",
+        json_schema_extra={"prompt": "Select inventory gate mode (exp/linear)"},
+    )
+    inventory_gate_min: Decimal = Field(
+        default=Decimal("0.05"),
+        description="Minimum gate factor floor.",
+        ge=0,
+        le=1,
+        json_schema_extra={"prompt": "Enter inventory gate minimum (0-1)"},
+    )
+    inventory_cross_suppress_enabled: bool = Field(
+        default=True,
+        description="Enable suppression after inventory sign crossing.",
+        json_schema_extra={"prompt": "Enable inventory crossing suppression? (Yes/No)"},
+    )
+    inventory_cross_deadband_base: Decimal = Field(
+        default=Decimal("0.0002"),
+        description="Deadband on base inventory for crossing detection.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter crossing deadband in base units"},
+    )
+    inventory_cross_suppress_factor: Decimal = Field(
+        default=Decimal("0.2"),
+        description="Maximum gate factor during crossing suppression hold.",
+        ge=0,
+        le=1,
+        json_schema_extra={"prompt": "Enter crossing suppress factor (0-1)"},
+    )
+    inventory_cross_hold_secs: int = Field(
+        default=120,
+        description="Hold duration for crossing suppression.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter crossing suppress hold (seconds)"},
+    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -548,6 +595,8 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "side_intensity_use_censoring",
         "side_intensity_debug_logging",
         "side_intensity_a_skew_enabled",
+        "inventory_gate_enabled",
+        "inventory_cross_suppress_enabled",
         mode="before")
     @classmethod
     def validate_bool(cls, v: str):
@@ -697,6 +746,47 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         if ret is not None:
             raise ValueError(ret)
         return v
+
+    @field_validator("inventory_gate_scale_pct", mode="before")
+    @classmethod
+    def validate_inventory_gate_scale_pct(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=False)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("inventory_gate_min", "inventory_cross_suppress_factor", mode="before")
+    @classmethod
+    def validate_inventory_gate_unit_interval(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), max_value=Decimal("1"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("inventory_cross_deadband_base", mode="before")
+    @classmethod
+    def validate_inventory_cross_deadband(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("inventory_cross_hold_secs", mode="before")
+    @classmethod
+    def validate_inventory_cross_hold_secs(cls, v: str):
+        ret = validate_int(v, min_value=0)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("inventory_gate_mode", mode="before")
+    @classmethod
+    def validate_inventory_gate_mode(cls, v: str):
+        value = str(v).lower()
+        valid_values = {"exp", "linear"}
+        if value not in valid_values:
+            raise ValueError("Invalid inventory_gate_mode, choose from ['exp', 'linear']")
+        return value
 
     @field_validator("side_intensity_delta_mode", mode="before")
     @classmethod

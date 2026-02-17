@@ -34,6 +34,7 @@ from hummingbot.strategy.avellaneda_market_making.avellaneda_market_making_confi
 )
 from hummingbot.strategy.avellaneda_market_making.a_skew import compute_a_skew_price
 from hummingbot.strategy.avellaneda_market_making.drift_regime import DriftRegimeConfig, DriftRegimeEstimator
+from hummingbot.strategy.avellaneda_market_making.inventory_gate import apply_cross_suppression, compute_inventory_gate
 from hummingbot.strategy.avellaneda_market_making.side_intensity_estimator import SideIntensityConfig, SideIntensityEstimator
 from hummingbot.strategy.conditional_execution_state import (
     RunAlwaysExecutionState,
@@ -135,6 +136,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._a_skew_r_base = s_decimal_zero
         self._a_skew_last_sign = 0
         self._a_skew_last_switch_ts = 0
+        self._a_skew_price_effective = s_decimal_zero
+        self._inventory_gate_value = s_decimal_one
+        self._inventory_quote_value = s_decimal_zero
+        self._prev_net_inventory_base = s_decimal_zero
+        self._cross_suppress_until_ts = 0
         self._debug_csv_path = debug_csv_path
         self._is_debug = is_debug
         try:
@@ -748,7 +754,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             if self._side_intensity_metrics is None:
                 lines.extend(["    side intensity not initialized yet."])
             else:
-                side_df = pd.DataFrame(
+                side_main_df = pd.DataFrame(
                     data=[[
                         f"{Decimal(str(self._side_intensity_metrics.k_bid)):.4f}",
                         f"{Decimal(str(self._side_intensity_metrics.k_ask)):.4f}",
@@ -760,13 +766,35 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                         self._side_intensity_metrics.e_ask,
                         f"{Decimal(str(self._last_delta_bid)):.10f}",
                         f"{Decimal(str(self._last_delta_ask)):.10f}",
+                    ]],
+                    columns=["k_b", "k_a", "A_b", "A_a", "n_b", "n_a", "e_b", "e_a", "δ_b", "δ_a"],
+                )
+                side_asym_df = pd.DataFrame(
+                    data=[[
                         f"{Decimal(str(self._a_skew_ratio_bps)):.4f}",
                         f"{Decimal(str(self._a_skew_price_final)):.10f}",
-                        f"{(Decimal(str(self._a_skew_price_final)) / Decimal(str(self._a_skew_r_base)) * Decimal('10000') if Decimal(str(self._a_skew_r_base)) != s_decimal_zero else s_decimal_zero):.4f}",
+                        f"{(Decimal(str(self._a_skew_price_final)) / Decimal(str(ref_price)) * Decimal('10000') if Decimal(str(ref_price)) != s_decimal_zero else s_decimal_zero):.4f}",
+                        f"{Decimal(str(self._inventory_gate_value)):.4f}",
+                        f"{Decimal(str(self._a_skew_price_effective)):.10f}",
+                        f"{(Decimal(str(self._a_skew_price_effective)) / Decimal(str(ref_price)) * Decimal('10000') if Decimal(str(ref_price)) != s_decimal_zero else s_decimal_zero):.4f}",
+                        f"{Decimal(str(self._a_skew_r_base)):.{ref_price_decimals}f}",
+                        f"{Decimal(str(self._reservation_price)):.{ref_price_decimals}f}",
+                        f"{Decimal(str(self._inventory_quote_value)):.4f}",
                     ]],
-                    columns=["k_b", "k_a", "A_b", "A_a", "n_b", "n_a", "e_b", "e_a", "δ_b", "δ_a", "A-ratio bps", "A-skew", "A-skew bps"],
+                    columns=[
+                        "A-ratio bps",
+                        "A-skew Raw",
+                        "A-skew Raw bps",
+                        "Gate g",
+                        "A-skew Eff",
+                        "A-skew Eff bps",
+                        "r_base",
+                        "r_final",
+                        "inv_quote",
+                    ],
                 )
-                lines.extend(["    " + line for line in side_df.to_string(index=False).split("\n")])
+                lines.extend(["    " + line for line in side_main_df.to_string(index=False).split("\n")])
+                lines.extend(["    " + line for line in side_asym_df.to_string(index=False).split("\n")])
 
         assets_df = map_df_to_str(self.pure_mm_assets_df(True))
         first_col_length = max(*assets_df[0].apply(len))
@@ -1075,6 +1103,9 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             self._a_skew_r_base = r_base
             self._a_skew_ratio_bps = s_decimal_zero
             self._a_skew_price_final = s_decimal_zero
+            self._a_skew_price_effective = s_decimal_zero
+            self._inventory_gate_value = s_decimal_one
+            self._inventory_quote_value = abs(net_base_inventory * price)
             if (
                 bool(self._config_map.side_intensity_enabled)
                 and bool(self._config_map.side_intensity_a_skew_enabled)
@@ -1116,7 +1147,33 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 self._a_skew_prev_price_smoothed = Decimal(str(skew_smoothed))
                 self._a_skew_price_final = Decimal(str(skew_final))
                 self._a_skew_ratio_bps = Decimal(str(ratio_bps))
-                self._reservation_price = r_base + self._a_skew_price_final
+
+                gate_value = 1.0
+                if bool(self._config_map.inventory_gate_enabled):
+                    gate_value = compute_inventory_gate(
+                        q_base=float(net_base_inventory),
+                        mid=float(price),
+                        inv_cap_quote=float(self._config_map.inventory_risk_cap_quote),
+                        scale_pct=float(self._config_map.inventory_gate_scale_pct),
+                        mode=str(self._config_map.inventory_gate_mode),
+                        gate_min=float(self._config_map.inventory_gate_min),
+                    )
+                    gate_value, self._cross_suppress_until_ts = apply_cross_suppression(
+                        gate=gate_value,
+                        q_base=float(net_base_inventory),
+                        prev_q_base=float(self._prev_net_inventory_base),
+                        now_ts=float(self._current_timestamp),
+                        suppress_until_ts=float(self._cross_suppress_until_ts),
+                        deadband_base=float(self._config_map.inventory_cross_deadband_base),
+                        suppress_factor=float(self._config_map.inventory_cross_suppress_factor),
+                        hold_secs=int(self._config_map.inventory_cross_hold_secs),
+                        enabled=bool(self._config_map.inventory_cross_suppress_enabled),
+                    )
+
+                self._inventory_gate_value = Decimal(str(gate_value))
+                self._a_skew_price_effective = self._a_skew_price_final * self._inventory_gate_value
+                self._reservation_price = r_base + self._a_skew_price_effective
+            self._prev_net_inventory_base = net_base_inventory
 
             # Method 1: side-specific offsets from same Avellaneda structure with k_b/k_a.
             delta_common = self.gamma * vol * time_left_fraction / Decimal("2")
@@ -1148,8 +1205,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                     f"n_b={self._side_intensity_metrics.n_bid} n_a={self._side_intensity_metrics.n_ask} "
                     f"e_b={self._side_intensity_metrics.e_bid} e_a={self._side_intensity_metrics.e_ask} "
                     f"ratio_bps={self._a_skew_ratio_bps:.4f} "
-                    f"a_skew_price={self._a_skew_price_final:.10f} "
-                    f"a_skew_bps={(self._a_skew_price_final / r_base * Decimal('10000') if r_base != s_decimal_zero else s_decimal_zero):.4f} "
+                    f"inv_quote={self._inventory_quote_value:.4f} gate={self._inventory_gate_value:.4f} "
+                    f"a_skew_raw={self._a_skew_price_final:.10f} "
+                    f"a_skew_raw_bps={(self._a_skew_price_final / price * Decimal('10000') if price != s_decimal_zero else s_decimal_zero):.4f} "
+                    f"a_skew_eff={self._a_skew_price_effective:.10f} "
+                    f"a_skew_eff_bps={(self._a_skew_price_effective / price * Decimal('10000') if price != s_decimal_zero else s_decimal_zero):.4f} "
                     f"r_base={r_base:.10f} r_final={self._reservation_price:.10f} "
                     f"delta_b={delta_bid:.10f} delta_a={delta_ask:.10f} "
                     f"net_inventory_base={net_base_inventory:.8f} inventory_risk_quote={inventory_risk_quote:.4f}"

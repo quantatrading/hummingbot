@@ -63,6 +63,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         object _a_skew_r_base
         int _a_skew_last_sign
         double _a_skew_last_switch_ts
+        object _a_skew_price_effective
+        object _inventory_gate_value
+        object _inventory_quote_value
+        object _prev_net_inventory_base
+        double _cross_suppress_until_ts
         str _debug_csv_path
         object _avg_vol
         TradingIntensityIndicator _trading_intensity
