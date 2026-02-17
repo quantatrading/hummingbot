@@ -32,6 +32,7 @@ from hummingbot.strategy.avellaneda_market_making.avellaneda_market_making_confi
     MultiOrderLevelModel,
     TrackHangingOrdersModel,
 )
+from hummingbot.strategy.avellaneda_market_making.a_skew import compute_a_skew_price
 from hummingbot.strategy.avellaneda_market_making.drift_regime import DriftRegimeConfig, DriftRegimeEstimator
 from hummingbot.strategy.avellaneda_market_making.side_intensity_estimator import SideIntensityConfig, SideIntensityEstimator
 from hummingbot.strategy.conditional_execution_state import (
@@ -128,6 +129,12 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._side_intensity_last_log_ts = 0
         self._last_delta_bid = s_decimal_zero
         self._last_delta_ask = s_decimal_zero
+        self._a_skew_prev_price_smoothed = s_decimal_zero
+        self._a_skew_price_final = s_decimal_zero
+        self._a_skew_ratio_bps = s_decimal_zero
+        self._a_skew_r_base = s_decimal_zero
+        self._a_skew_last_sign = 0
+        self._a_skew_last_switch_ts = 0
         self._debug_csv_path = debug_csv_path
         self._is_debug = is_debug
         try:
@@ -753,8 +760,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                         self._side_intensity_metrics.e_ask,
                         f"{Decimal(str(self._last_delta_bid)):.10f}",
                         f"{Decimal(str(self._last_delta_ask)):.10f}",
+                        f"{Decimal(str(self._a_skew_ratio_bps)):.4f}",
+                        f"{Decimal(str(self._a_skew_price_final)):.10f}",
+                        f"{(Decimal(str(self._a_skew_price_final)) / Decimal(str(self._a_skew_r_base)) * Decimal('10000') if Decimal(str(self._a_skew_r_base)) != s_decimal_zero else s_decimal_zero):.4f}",
                     ]],
-                    columns=["k_b", "k_a", "A_b", "A_a", "n_b", "n_a", "e_b", "e_a", "δ_b", "δ_a"],
+                    columns=["k_b", "k_a", "A_b", "A_a", "n_b", "n_a", "e_b", "e_a", "δ_b", "δ_a", "A-ratio bps", "A-skew", "A-skew bps"],
                 )
                 lines.extend(["    " + line for line in side_df.to_string(index=False).split("\n")])
 
@@ -1061,6 +1071,53 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 if self._side_intensity_metrics.e_ask >= int(self._config_map.side_intensity_min_events):
                     k_ask = Decimal(str(self._side_intensity_metrics.k_ask))
 
+            r_base = self._reservation_price
+            self._a_skew_r_base = r_base
+            self._a_skew_ratio_bps = s_decimal_zero
+            self._a_skew_price_final = s_decimal_zero
+            if (
+                bool(self._config_map.side_intensity_enabled)
+                and bool(self._config_map.side_intensity_a_skew_enabled)
+                and self._side_intensity_metrics is not None
+            ):
+                skew_final, skew_smoothed, ratio_bps = compute_a_skew_price(
+                    r_base=float(r_base),
+                    gamma=float(self.gamma),
+                    A_b=float(self._side_intensity_metrics.A_bid),
+                    A_a=float(self._side_intensity_metrics.A_ask),
+                    delta_mode=str(self._config_map.side_intensity_delta_mode),
+                    max_bps=float(self._config_map.side_intensity_a_skew_max_bps),
+                    deadband_bps=float(self._config_map.side_intensity_a_skew_deadband_bps),
+                    eps=float(self._config_map.side_intensity_a_eps),
+                    prev=float(self._a_skew_prev_price_smoothed),
+                    alpha=float(self._config_map.side_intensity_a_skew_ewma_alpha),
+                )
+
+                # Sign hysteresis: if sign flips too soon, force decay toward zero instead of flipping.
+                sign = 1 if skew_final > 0 else (-1 if skew_final < 0 else 0)
+                if (
+                    sign != 0
+                    and self._a_skew_last_sign != 0
+                    and sign != self._a_skew_last_sign
+                    and (self._current_timestamp - self._a_skew_last_switch_ts) < float(self._config_map.side_intensity_a_skew_hold_secs)
+                ):
+                    alpha = float(self._config_map.side_intensity_a_skew_ewma_alpha)
+                    skew_smoothed = (1.0 - alpha) * float(self._a_skew_prev_price_smoothed)
+                    cap_price = abs(float(r_base)) * float(self._config_map.side_intensity_a_skew_max_bps) / 1e4
+                    if cap_price <= 0:
+                        skew_final = 0.0
+                    else:
+                        skew_final = max(-cap_price, min(cap_price, skew_smoothed))
+                    sign = 1 if skew_final > 0 else (-1 if skew_final < 0 else 0)
+                elif sign != 0 and sign != self._a_skew_last_sign:
+                    self._a_skew_last_sign = sign
+                    self._a_skew_last_switch_ts = self._current_timestamp
+
+                self._a_skew_prev_price_smoothed = Decimal(str(skew_smoothed))
+                self._a_skew_price_final = Decimal(str(skew_final))
+                self._a_skew_ratio_bps = Decimal(str(ratio_bps))
+                self._reservation_price = r_base + self._a_skew_price_final
+
             # Method 1: side-specific offsets from same Avellaneda structure with k_b/k_a.
             delta_common = self.gamma * vol * time_left_fraction / Decimal("2")
             delta_bid = delta_common + Decimal(s_decimal_one + self.gamma / k_bid).ln() / self.gamma
@@ -1090,8 +1147,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                     f"A_b={self._side_intensity_metrics.A_bid:.6f} A_a={self._side_intensity_metrics.A_ask:.6f} "
                     f"n_b={self._side_intensity_metrics.n_bid} n_a={self._side_intensity_metrics.n_ask} "
                     f"e_b={self._side_intensity_metrics.e_bid} e_a={self._side_intensity_metrics.e_ask} "
+                    f"ratio_bps={self._a_skew_ratio_bps:.4f} "
+                    f"a_skew_price={self._a_skew_price_final:.10f} "
+                    f"a_skew_bps={(self._a_skew_price_final / r_base * Decimal('10000') if r_base != s_decimal_zero else s_decimal_zero):.4f} "
+                    f"r_base={r_base:.10f} r_final={self._reservation_price:.10f} "
                     f"delta_b={delta_bid:.10f} delta_a={delta_ask:.10f} "
-                    f"reservation_price={self._reservation_price:.10f} "
                     f"net_inventory_base={net_base_inventory:.8f} inventory_risk_quote={inventory_risk_quote:.4f}"
                 )
 

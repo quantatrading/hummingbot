@@ -57,6 +57,12 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         double _side_intensity_last_log_ts
         object _last_delta_bid
         object _last_delta_ask
+        object _a_skew_prev_price_smoothed
+        object _a_skew_price_final
+        object _a_skew_ratio_bps
+        object _a_skew_r_base
+        int _a_skew_last_sign
+        double _a_skew_last_switch_ts
         str _debug_csv_path
         object _avg_vol
         TradingIntensityIndicator _trading_intensity

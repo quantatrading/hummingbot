@@ -331,6 +331,42 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         description="Enable side intensity telemetry logging.",
         json_schema_extra={"prompt": "Enable side intensity debug logging? (Yes/No)"},
     )
+    side_intensity_a_skew_enabled: bool = Field(
+        default=True,
+        description="Enable A_b/A_a baseline-intensity asymmetry skew on reservation price center.",
+        json_schema_extra={"prompt": "Enable A-asymmetry center skew? (Yes/No)"},
+    )
+    side_intensity_a_skew_max_bps: Decimal = Field(
+        default=Decimal("5.0"),
+        description="Maximum absolute A-skew impact in bps of reservation price.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter max A-skew impact (bps)"},
+    )
+    side_intensity_a_skew_ewma_alpha: Decimal = Field(
+        default=Decimal("0.2"),
+        description="EWMA alpha for A-skew smoothing.",
+        ge=0,
+        le=1,
+        json_schema_extra={"prompt": "Enter A-skew smoothing alpha (0-1)"},
+    )
+    side_intensity_a_skew_hold_secs: int = Field(
+        default=60,
+        description="Minimum hold time before allowing A-skew sign flip.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter A-skew sign hold (seconds)"},
+    )
+    side_intensity_a_skew_deadband_bps: Decimal = Field(
+        default=Decimal("0.2"),
+        description="Deadband on ln(A_b/A_a) ratio expressed in bps.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter A-skew deadband (bps)"},
+    )
+    side_intensity_a_eps: Decimal = Field(
+        default=Decimal("1e-9"),
+        description="Numerical epsilon for A-ratio stability.",
+        gt=0,
+        json_schema_extra={"prompt": "Enter A-skew epsilon"},
+    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -511,6 +547,7 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "side_intensity_enabled",
         "side_intensity_use_censoring",
         "side_intensity_debug_logging",
+        "side_intensity_a_skew_enabled",
         mode="before")
     @classmethod
     def validate_bool(cls, v: str):
@@ -616,6 +653,14 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
             raise ValueError(ret)
         return v
 
+    @field_validator("side_intensity_a_skew_ewma_alpha", mode="before")
+    @classmethod
+    def validate_side_intensity_a_skew_alpha(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), max_value=Decimal("1"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
     @field_validator("side_intensity_k_min", "side_intensity_k_max", mode="before")
     @classmethod
     def validate_side_intensity_k_bounds(cls, v: str):
@@ -624,10 +669,31 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
             raise ValueError(ret)
         return v
 
-    @field_validator("side_intensity_window_secs", "side_intensity_update_interval_secs", "side_intensity_min_events", mode="before")
+    @field_validator(
+        "side_intensity_window_secs",
+        "side_intensity_update_interval_secs",
+        "side_intensity_min_events",
+        "side_intensity_a_skew_hold_secs",
+        mode="before")
     @classmethod
     def validate_side_intensity_ints(cls, v: str):
         ret = validate_int(v, min_value=0)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("side_intensity_a_skew_max_bps", "side_intensity_a_skew_deadband_bps", mode="before")
+    @classmethod
+    def validate_side_intensity_a_skew_non_negative(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("side_intensity_a_eps", mode="before")
+    @classmethod
+    def validate_side_intensity_a_eps(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=False)
         if ret is not None:
             raise ValueError(ret)
         return v
