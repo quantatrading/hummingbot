@@ -615,11 +615,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         return pd.DataFrame(data=data, columns=columns)
 
     def market_status_data_frame(self, market_trading_pair_tuples: List[MarketTradingPairTuple]) -> pd.DataFrame:
-        use_vamp = self.reference_price_source == "vamp"
         markets_data = []
-        markets_columns = ["Exchange", "Market", "Best Bid", "Best Ask", "MidPrice"]
-        if use_vamp:
-            markets_columns.append("VampMidPrice")
+        markets_columns = ["Exchange", "Market", "Best Bid", "Best Ask", "Midprice"]
         market_books = [(self._market_info.market, self._market_info.trading_pair)]
         for market, trading_pair in market_books:
             bid_price = market.get_price(trading_pair, False)
@@ -637,9 +634,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 f"{ask_price:.{price_decimals}f}",
                 f"{mid_price:.{price_decimals}f}",
             ]
-            if use_vamp:
-                vamp_price = market.quantize_order_price(trading_pair, Decimal(str(self.c_get_vamp_price())))
-                row.insert(5, f"{vamp_price:.{price_decimals}f}")
             markets_data.append(row)
         return pd.DataFrame(data=markets_data, columns=markets_columns).replace(np.nan, '', regex=True)
 
@@ -671,18 +665,20 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         ref_price = market.quantize_order_price(trading_pair, Decimal(str(self.get_price())))
         ref_price_quantum = market.get_order_price_quantum(trading_pair, ref_price)
         ref_price_decimals = max(0, -ref_price_quantum.as_tuple().exponent)
-        vamp_q_display = f"{Decimal(str(self.vamp_volume)):.4f}"
+        reservation_price = market.quantize_order_price(trading_pair, Decimal(str(self._reservation_price)))
+        optimal_spread = market.quantize_order_price(trading_pair, Decimal(str(self._optimal_spread)))
+        resprice_delta = market.quantize_order_price(trading_pair, reservation_price - ref_price)
         ref_metrics_df = pd.DataFrame(
             data=[[
                 f"{ref_price:.{ref_price_decimals}f}",
                 self.reference_price_source,
-                vamp_q_display,
-                round(self._reservation_price, 5),
-                round(self._optimal_spread, 5),
+                f"{reservation_price:.{ref_price_decimals}f}",
+                f"{optimal_spread:.{ref_price_decimals}f}",
+                f"{resprice_delta:.{ref_price_decimals}f}",
             ]],
-            columns=["RefPrice", "RefSource", "VampQ", "Reservation Price", "Optimal Spread"],
+            columns=["RefPrice", "RefSource", "Reservation Price", "Optimal Spread", "ResPrice Delta"],
         )
-        lines.extend(["    " + line for line in ref_metrics_df.to_string(index=False).split("\n")])
+        lines.extend(["  Avellenada & Stoikov Model:"] + ["    " + line for line in ref_metrics_df.to_string(index=False).split("\n")])
 
         assets_df = map_df_to_str(self.pure_mm_assets_df(True))
         first_col_length = max(*assets_df[0].apply(len))
@@ -710,7 +706,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 lines.extend([f"    time until end of trading cycle = N/A"])
 
         if bool(self._config_map.drift_enabled):
-            lines.extend(["", "  Drift telemetry:"])
+            lines.extend(["", "  Hamilton-Jacobi-Bellman NZD:"])
             if self._drift_metrics is None:
                 lines.extend(["    drift not initialized yet."])
             else:
@@ -720,14 +716,22 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 inventory_risk_quote = abs(net_base_inventory * ref_price_for_drift)
                 drift_term_bps = Decimal(str(self._drift_metrics.drift_term_bps))
                 drift_term_price = ref_price_for_drift * drift_term_bps / Decimal("10000")
-                reservation_before = self._reservation_price - drift_term_price
+                reservation_after = market.quantize_order_price(trading_pair, Decimal(str(self._reservation_price)))
+                reservation_before = market.quantize_order_price(trading_pair, reservation_after - drift_term_price)
+                reservation_delta = market.quantize_order_price(trading_pair, reservation_after - reservation_before)
+                drift_df = pd.DataFrame(
+                    data=[[
+                        self._drift_metrics.regime,
+                        f"{drift_term_bps:.4f} bps",
+                        f"{reservation_after:.{ref_price_decimals}f}",
+                        f"{reservation_delta:.{ref_price_decimals}f}",
+                    ]],
+                    columns=["Regime", "DriftTerm", "ReservationDrift", "Delta"],
+                )
+                lines.extend(["    " + line for line in drift_df.to_string(index=False).split("\n")])
                 lines.extend([
-                    f"    ready={self._drift_metrics.ready} regime={self._drift_metrics.regime} "
-                    f"defensive_active={self._drift_metrics.defensive_active}",
                     f"    z={self._drift_metrics.z:.4f} mu_60={self._drift_metrics.mu_60:.6E} "
-                    f"mu_300={self._drift_metrics.mu_300:.6E} sig_300={self._drift_metrics.sig_300:.6E}",
-                    f"    tau={self._drift_metrics.tau:.4f} drift_term_bps={self._drift_metrics.drift_term_bps:.4f}",
-                    f"    reservation_price_before={reservation_before:.10f} reservation_price_after={self._reservation_price:.10f}",
+                    f"mu_300={self._drift_metrics.mu_300:.6E} sig_300={self._drift_metrics.sig_300:.6E} tau={self._drift_metrics.tau:.4f}",
                     f"    net_inventory_base={net_base_inventory:.8f} inventory_risk_quote={inventory_risk_quote:.4f}",
                 ])
 
