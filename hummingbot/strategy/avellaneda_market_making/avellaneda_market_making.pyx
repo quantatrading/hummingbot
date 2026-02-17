@@ -32,7 +32,6 @@ from hummingbot.strategy.avellaneda_market_making.avellaneda_market_making_confi
     MultiOrderLevelModel,
     TrackHangingOrdersModel,
 )
-from hummingbot.strategy.avellaneda_market_making.drift_regime import DriftRegimeConfig, DriftRegimeEstimator
 from hummingbot.strategy.conditional_execution_state import (
     RunAlwaysExecutionState,
     RunInTimeConditionalExecutionState
@@ -119,9 +118,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._optimal_spread = s_decimal_zero
         self._optimal_ask = s_decimal_zero
         self._optimal_bid = s_decimal_zero
-        self._drift_regime = None
-        self._drift_last_metrics = {}
-        self._drift_last_log_timestamp = 0.0
         self._debug_csv_path = debug_csv_path
         self._is_debug = is_debug
         try:
@@ -132,7 +128,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
         self.get_config_map_execution_mode()
         self.get_config_map_hanging_orders()
-        self._drift_regime = DriftRegimeEstimator(self._build_drift_regime_config())
 
     def all_markets_ready(self):
         return all([market.ready for market in self._sb_markets])
@@ -454,26 +449,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self.get_config_map_execution_mode()
         self.get_config_map_hanging_orders()
         self.get_config_map_indicators()
-        if self._drift_regime is not None:
-            self._drift_regime.update_config(self._build_drift_regime_config())
-
-    def _build_drift_regime_config(self):
-        return DriftRegimeConfig(
-            z_threshold=float(self._config_map.drift_z_threshold),
-            confirm_secs=int(self._config_map.drift_confirm_secs),
-            hysteresis_secs=int(self._config_map.drift_hysteresis_secs),
-            kappa=float(self._config_map.drift_kappa),
-            z_clip=float(self._config_map.drift_z_clip),
-            bias_max_bps=float(self._config_map.drift_bias_max_bps),
-            window_short_secs=int(self._config_map.drift_window_short_secs),
-            window_long_secs=int(self._config_map.drift_window_long_secs),
-            window_vol_secs=int(self._config_map.drift_window_vol_secs),
-            spread_adjust_enabled=bool(self._config_map.drift_spread_adjust_enabled),
-            spread_multiplier_max=float(self._config_map.drift_spread_multiplier_max),
-            inventory_risk_cap_quote=float(self._config_map.inventory_risk_cap_quote),
-            defensive_bias_max_bps=float(self._config_map.defensive_bias_max_bps),
-            defensive_hold_secs=int(self._config_map.defensive_hold_secs),
-        )
 
     def get_config_map_execution_mode(self):
         try:
@@ -894,8 +869,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             return
 
         q_target = Decimal(str(self.c_calculate_target_inventory()))
-        net_base_inventory = market.get_balance(self.base_asset) - q_target
-        inventory_risk_quote = abs(net_base_inventory * price)
         q = (market.get_balance(self.base_asset) - q_target) / (inventory)
         # Volatility has to be in absolute values (prices) because in calculation of reservation price it's not multiplied by the current price, therefore
         # it can't be a percentage. The result of the multiplication has to be an absolute price value because it's being subtracted from the current price
@@ -925,31 +898,9 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             # This leads to normalization of the risk_factor and will guaranetee consistent behavior on all price ranges of the asset, and across assets
 
             self._reservation_price = price - (q * self.gamma * vol * time_left_fraction)
-            reservation_price_before = self._reservation_price
 
             self._optimal_spread = self.gamma * vol * time_left_fraction
             self._optimal_spread += 2 * Decimal(1 + self.gamma / self._kappa).ln() / self.gamma
-
-            if bool(self._config_map.drift_enabled) and self._drift_regime is not None:
-                drift_metrics = self._drift_regime.update(
-                    timestamp=float(self._last_sampling_timestamp if self._last_sampling_timestamp > 0 else self._last_timestamp),
-                    reference_price=float(price),
-                    net_base_inventory=float(net_base_inventory),
-                    inventory_risk_quote=float(inventory_risk_quote),
-                    enabled=True,
-                )
-                self._drift_last_metrics = drift_metrics
-                bias_bps = Decimal(str(drift_metrics.get("bias_bps", 0.0)))
-                if bias_bps != s_decimal_zero:
-                    bias_price = price * bias_bps / Decimal("10000")
-                    self._reservation_price += bias_price
-
-                if bool(self._config_map.drift_spread_adjust_enabled):
-                    spread_multiplier = Decimal(str(drift_metrics.get("spread_multiplier", 1.0)))
-                    if spread_multiplier > s_decimal_one:
-                        self._optimal_spread *= spread_multiplier
-            else:
-                self._drift_last_metrics = {}
 
             min_spread = price / 100 * Decimal(str(self._config_map.min_spread))
 
@@ -958,36 +909,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
             self._optimal_ask = max(self._reservation_price + self._optimal_spread / 2, min_limit_ask)
             self._optimal_bid = min(self._reservation_price - self._optimal_spread / 2, max_limit_bid)
-
-            if bool(self._config_map.drift_enabled):
-                drift_metrics = self._drift_last_metrics if self._drift_last_metrics else {}
-                if drift_metrics.get("regime_changed", False):
-                    self.logger().info(
-                        "Drift regime changed: "
-                        f"{drift_metrics.get('regime')} z={drift_metrics.get('z', 0.0):.4f} "
-                        f"mu_60={drift_metrics.get('mu_60', 0.0):.6e} mu_300={drift_metrics.get('mu_300', 0.0):.6e}"
-                    )
-                if drift_metrics.get("defensive_triggered", False):
-                    self.logger().warning(
-                        "Drift defensive override triggered: "
-                        f"inventory_risk_quote={inventory_risk_quote:.4f} net_base={net_base_inventory:.8f} "
-                        f"bias_bps={drift_metrics.get('bias_bps', 0.0):.4f}"
-                    )
-                if self._last_sampling_timestamp - self._drift_last_log_timestamp >= 60:
-                    self._drift_last_log_timestamp = self._last_sampling_timestamp
-                    self.logger().info(
-                        "Drift telemetry: "
-                        f"regime={drift_metrics.get('regime', 'NEUTRAL')} "
-                        f"z={drift_metrics.get('z', 0.0):.4f} "
-                        f"mu_60={drift_metrics.get('mu_60', 0.0):.6e} "
-                        f"mu_300={drift_metrics.get('mu_300', 0.0):.6e} "
-                        f"sig_300={drift_metrics.get('sig_300', 0.0):.6e} "
-                        f"bias_bps={drift_metrics.get('bias_bps', 0.0):.4f} "
-                        f"reservation_before={reservation_price_before:.10f} "
-                        f"reservation_after={self._reservation_price:.10f} "
-                        f"net_inventory_base={net_base_inventory:.8f} "
-                        f"inventory_risk_quote={inventory_risk_quote:.4f}"
-                    )
 
             # This is not what the algorithm will use as proposed bid and ask. This is just the raw output.
             # Optimal bid and optimal ask prices will be used

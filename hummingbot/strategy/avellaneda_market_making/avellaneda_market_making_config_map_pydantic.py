@@ -203,94 +203,6 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         ge=0,
         json_schema_extra={"prompt": "Enter maximum auto VAMP Q (0 disables)"},
     )
-    drift_enabled: bool = Field(
-        default=True,
-        description="Enable short-horizon drift regime bias in reservation price.",
-        json_schema_extra={"prompt": "Enable drift regime bias? (Yes/No)"},
-    )
-    drift_z_threshold: Decimal = Field(
-        default=Decimal("0.6"),
-        description="Regime activation z-score threshold.",
-        gt=0,
-        json_schema_extra={"prompt": "Enter drift z-score threshold"},
-    )
-    drift_confirm_secs: int = Field(
-        default=30,
-        description="Seconds a regime condition must persist before switching.",
-        ge=0,
-        json_schema_extra={"prompt": "Enter drift confirm seconds"},
-    )
-    drift_hysteresis_secs: int = Field(
-        default=180,
-        description="Minimum seconds between regime switches.",
-        ge=0,
-        json_schema_extra={"prompt": "Enter drift hysteresis seconds"},
-    )
-    drift_kappa: Decimal = Field(
-        default=Decimal("0.25"),
-        description="Scale factor for vol-scaled drift bias.",
-        ge=0,
-        json_schema_extra={"prompt": "Enter drift bias kappa"},
-    )
-    drift_z_clip: Decimal = Field(
-        default=Decimal("2.0"),
-        description="Absolute z-score clip for bias.",
-        gt=0,
-        json_schema_extra={"prompt": "Enter drift z-score clip"},
-    )
-    drift_bias_max_bps: Decimal = Field(
-        default=Decimal("20.0"),
-        description="Maximum absolute drift bias in bps.",
-        ge=0,
-        json_schema_extra={"prompt": "Enter max drift bias (bps)"},
-    )
-    drift_window_short_secs: int = Field(
-        default=60,
-        description="Short drift window (seconds).",
-        ge=5,
-        json_schema_extra={"prompt": "Enter short drift window (seconds)"},
-    )
-    drift_window_long_secs: int = Field(
-        default=300,
-        description="Long drift confirmation window (seconds).",
-        ge=10,
-        json_schema_extra={"prompt": "Enter long drift window (seconds)"},
-    )
-    drift_window_vol_secs: int = Field(
-        default=300,
-        description="Volatility window for drift scaling (seconds).",
-        ge=10,
-        json_schema_extra={"prompt": "Enter volatility window (seconds)"},
-    )
-    drift_spread_adjust_enabled: bool = Field(
-        default=False,
-        description="If enabled, widen spread modestly in strong trend regimes.",
-        json_schema_extra={"prompt": "Enable drift spread adjustment? (Yes/No)"},
-    )
-    drift_spread_multiplier_max: Decimal = Field(
-        default=Decimal("1.15"),
-        description="Maximum multiplier for drift spread adjustment.",
-        ge=1,
-        json_schema_extra={"prompt": "Enter max drift spread multiplier"},
-    )
-    inventory_risk_cap_quote: Decimal = Field(
-        default=Decimal("200"),
-        description="Inventory risk cap in quote terms for defensive bias mode.",
-        ge=0,
-        json_schema_extra={"prompt": "Enter inventory risk cap (quote)"},
-    )
-    defensive_bias_max_bps: Decimal = Field(
-        default=Decimal("35.0"),
-        description="Maximum absolute defensive drift bias in bps.",
-        ge=0,
-        json_schema_extra={"prompt": "Enter max defensive drift bias (bps)"},
-    )
-    defensive_hold_secs: int = Field(
-        default=300,
-        description="How long defensive mode remains active after trigger (seconds).",
-        ge=0,
-        json_schema_extra={"prompt": "Enter defensive hold duration (seconds)"},
-    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -467,8 +379,6 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "add_transaction_costs",
         "should_wait_order_cancel_confirmation",
         "vamp_auto_q_enabled",
-        "drift_enabled",
-        "drift_spread_adjust_enabled",
         mode="before")
     @classmethod
     def validate_bool(cls, v: str):
@@ -533,39 +443,6 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
     @classmethod
     def validate_vamp_q_bounds(cls, v: str):
         ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
-        if ret is not None:
-            raise ValueError(ret)
-        return v
-
-    @field_validator(
-        "drift_z_threshold",
-        "drift_kappa",
-        "drift_z_clip",
-        "drift_bias_max_bps",
-        "drift_spread_multiplier_max",
-        "inventory_risk_cap_quote",
-        "defensive_bias_max_bps",
-        mode="before",
-    )
-    @classmethod
-    def validate_drift_decimal_non_negative(cls, v: str):
-        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
-        if ret is not None:
-            raise ValueError(ret)
-        return v
-
-    @field_validator(
-        "drift_confirm_secs",
-        "drift_hysteresis_secs",
-        "drift_window_short_secs",
-        "drift_window_long_secs",
-        "drift_window_vol_secs",
-        "defensive_hold_secs",
-        mode="before",
-    )
-    @classmethod
-    def validate_drift_int_non_negative(cls, v: str):
-        ret = validate_int(v, min_value=0)
         if ret is not None:
             raise ValueError(ret)
         return v
