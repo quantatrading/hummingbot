@@ -678,35 +678,10 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             ]],
             columns=["RefPrice", "RefSource", "Reservation Price", "Optimal Spread", "ResPrice Delta"],
         )
-        lines.extend(["  Avellenada & Stoikov Model:"] + ["    " + line for line in ref_metrics_df.to_string(index=False).split("\n")])
-
-        assets_df = map_df_to_str(self.pure_mm_assets_df(True))
-        first_col_length = max(*assets_df[0].apply(len))
-        df_lines = assets_df.to_string(index=False, header=False,
-                                       formatters={0: ("{:<" + str(first_col_length) + "}").format}).split("\n")
-        lines.extend(["", "  Assets:"] + ["    " + line for line in df_lines])
-
-        # See if there are any open orders.
-        if len(self.active_orders) > 0:
-            df = self.active_orders_df()
-            lines.extend(["", "  Orders:"] + ["    " + line for line in df.to_string(index=False).split("\n")])
-        else:
-            lines.extend(["", "  No active maker orders."])
-
-        volatility_pct = self._avg_vol.current_value / float(self.get_price()) * 100.0
-        if all((self.gamma, self._alpha, self._kappa, not isnan(volatility_pct))):
-            lines.extend(["", f"  Strategy parameters:",
-                          f"    risk_factor(\u03B3)= {self.gamma:.5E}",
-                          f"    order_book_intensity_factor(\u0391)= {self._alpha:.5E}",
-                          f"    order_book_depth_factor(\u03BA)= {self._kappa:.5E}",
-                          f"    volatility= {volatility_pct:.3f}%"])
-            if self._execution_state.time_left is not None:
-                lines.extend([f"    time until end of trading cycle = {str(datetime.timedelta(seconds=float(self._execution_state.time_left)//1e3))}"])
-            else:
-                lines.extend([f"    time until end of trading cycle = N/A"])
+        lines.extend(["  Avellaneda–Stoikov:"] + ["    " + line for line in ref_metrics_df.to_string(index=False).split("\n")])
 
         if bool(self._config_map.drift_enabled):
-            lines.extend(["", "  Hamilton-Jacobi-Bellman NZD:"])
+            lines.extend(["", "  Avellaneda–Stoikov (Drift-Adjusted):"])
             if self._drift_metrics is None:
                 lines.extend(["    drift not initialized yet."])
             else:
@@ -734,6 +709,31 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                     f"mu_300={self._drift_metrics.mu_300:.6E} sig_300={self._drift_metrics.sig_300:.6E} tau={self._drift_metrics.tau:.4f}",
                     f"    net_inventory_base={net_base_inventory:.8f} inventory_risk_quote={inventory_risk_quote:.4f}",
                 ])
+
+        assets_df = map_df_to_str(self.pure_mm_assets_df(True))
+        first_col_length = max(*assets_df[0].apply(len))
+        df_lines = assets_df.to_string(index=False, header=False,
+                                       formatters={0: ("{:<" + str(first_col_length) + "}").format}).split("\n")
+        lines.extend(["", "  Assets:"] + ["    " + line for line in df_lines])
+
+        # See if there are any open orders.
+        if len(self.active_orders) > 0:
+            df = self.active_orders_df()
+            lines.extend(["", "  Orders:"] + ["    " + line for line in df.to_string(index=False).split("\n")])
+        else:
+            lines.extend(["", "  No active maker orders."])
+
+        volatility_pct = self._avg_vol.current_value / float(self.get_price()) * 100.0
+        if all((self.gamma, self._alpha, self._kappa, not isnan(volatility_pct))):
+            lines.extend(["", f"  Strategy parameters:",
+                          f"    risk_factor(\u03B3)= {self.gamma:.5E}",
+                          f"    order_book_intensity_factor(\u0391)= {self._alpha:.5E}",
+                          f"    order_book_depth_factor(\u03BA)= {self._kappa:.5E}",
+                          f"    volatility= {volatility_pct:.3f}%"])
+            if self._execution_state.time_left is not None:
+                lines.extend([f"    time until end of trading cycle = {str(datetime.timedelta(seconds=float(self._execution_state.time_left)//1e3))}"])
+            else:
+                lines.extend([f"    time until end of trading cycle = N/A"])
 
         warning_lines.extend(self.balance_warning([self._market_info]))
 
