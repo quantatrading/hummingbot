@@ -66,10 +66,16 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         object _a_skew_price_effective
         object _inventory_gate_value
         object _inventory_quote_value
+        object _inventory_quote_ema_value
         object _inventory_size_stress
         object _inventory_size_multiplier
+        object _inventory_size_bid_multiplier
+        object _inventory_size_ask_multiplier
         object _inventory_size_base_amount
         object _inventory_size_adjusted_amount
+        object _inventory_size_bid_amount
+        object _inventory_size_ask_amount
+        double _inventory_size_last_update_ts
         object _prev_net_inventory_base
         double _cross_suppress_until_ts
         str _debug_csv_path

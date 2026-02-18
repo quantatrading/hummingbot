@@ -432,6 +432,42 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         ge=0,
         json_schema_extra={"prompt": "Enter inventory size scaling beta"},
     )
+    inv_stress_ema_halflife_secs: int = Field(
+        default=60,
+        description="EMA half-life (seconds) for inventory risk smoothing in quote terms.",
+        gt=0,
+        json_schema_extra={"prompt": "Enter inventory stress EMA half-life (seconds)"},
+    )
+    size_scaling_beta: Decimal = Field(
+        default=Decimal("3.0"),
+        description="Convex size scaling beta for exp(-beta * stress^power).",
+        ge=0,
+        json_schema_extra={"prompt": "Enter convex size scaling beta"},
+    )
+    size_scaling_min_mult: Decimal = Field(
+        default=Decimal("0.20"),
+        description="Minimum symmetric size multiplier under maximum stress.",
+        ge=0,
+        le=1,
+        json_schema_extra={"prompt": "Enter minimum size multiplier (0-1)"},
+    )
+    size_scaling_power: Decimal = Field(
+        default=Decimal("2.0"),
+        description="Convex power for stress in size scaling exp(-beta * stress^power).",
+        gt=0,
+        json_schema_extra={"prompt": "Enter convex power for size scaling"},
+    )
+    size_dir_bias_enabled: bool = Field(
+        default=True,
+        description="Enable directional per-side size bias to favor inventory flattening side.",
+        json_schema_extra={"prompt": "Enable directional size bias? (Yes/No)"},
+    )
+    size_dir_bias_k: Decimal = Field(
+        default=Decimal("0.50"),
+        description="Directional size bias strength k.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter directional size bias strength k"},
+    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -616,6 +652,7 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "inventory_gate_enabled",
         "inventory_cross_suppress_enabled",
         "inventory_size_scaling_enabled",
+        "size_dir_bias_enabled",
         mode="before")
     @classmethod
     def validate_bool(cls, v: str):
@@ -794,6 +831,38 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
     @classmethod
     def validate_inventory_size_beta(cls, v: str):
         ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("inv_stress_ema_halflife_secs", mode="before")
+    @classmethod
+    def validate_inv_stress_ema_halflife_secs(cls, v: str):
+        ret = validate_int(v, min_value=0, inclusive=False)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("size_scaling_min_mult", mode="before")
+    @classmethod
+    def validate_size_scaling_min_mult(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), max_value=Decimal("1"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("size_scaling_beta", "size_dir_bias_k", mode="before")
+    @classmethod
+    def validate_non_negative_scaling_decimals(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("size_scaling_power", mode="before")
+    @classmethod
+    def validate_size_scaling_power(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=False)
         if ret is not None:
             raise ValueError(ret)
         return v
