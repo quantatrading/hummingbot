@@ -414,6 +414,24 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         ge=0,
         json_schema_extra={"prompt": "Enter crossing suppress hold (seconds)"},
     )
+    inventory_size_scaling_enabled: bool = Field(
+        default=True,
+        description="Enable inventory-aware dynamic order-size scaling.",
+        json_schema_extra={"prompt": "Enable inventory-aware size scaling? (Yes/No)"},
+    )
+    inventory_size_min_mult: Decimal = Field(
+        default=Decimal("0.15"),
+        description="Minimum size multiplier under maximum inventory stress.",
+        ge=0,
+        le=1,
+        json_schema_extra={"prompt": "Enter minimum size multiplier (0-1)"},
+    )
+    inventory_size_beta: Decimal = Field(
+        default=Decimal("3.0"),
+        description="Exponential decay coefficient for inventory size scaling.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter inventory size scaling beta"},
+    )
     order_optimization_enabled: bool = Field(
         default=True,
         description=(
@@ -597,6 +615,7 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "side_intensity_a_skew_enabled",
         "inventory_gate_enabled",
         "inventory_cross_suppress_enabled",
+        "inventory_size_scaling_enabled",
         mode="before")
     @classmethod
     def validate_bool(cls, v: str):
@@ -759,6 +778,22 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
     @classmethod
     def validate_inventory_gate_unit_interval(cls, v: str):
         ret = validate_decimal(v, min_value=Decimal("0"), max_value=Decimal("1"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("inventory_size_min_mult", mode="before")
+    @classmethod
+    def validate_inventory_size_min_mult(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), max_value=Decimal("1"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("inventory_size_beta", mode="before")
+    @classmethod
+    def validate_inventory_size_beta(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
         if ret is not None:
             raise ValueError(ret)
         return v

@@ -66,6 +66,10 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         object _a_skew_price_effective
         object _inventory_gate_value
         object _inventory_quote_value
+        object _inventory_size_stress
+        object _inventory_size_multiplier
+        object _inventory_size_base_amount
+        object _inventory_size_adjusted_amount
         object _prev_net_inventory_base
         double _cross_suppress_until_ts
         str _debug_csv_path
@@ -84,6 +88,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
     cdef tuple c_get_adjusted_available_balance(self, list orders)
     cdef c_apply_order_price_modifiers(self, object proposal)
     cdef c_apply_order_amount_eta_transformation(self, object proposal)
+    cdef c_apply_inventory_size_scaling(self, object proposal)
     cdef c_apply_budget_constraint(self, object proposal)
     cdef c_apply_order_optimization(self, object proposal)
     cdef c_apply_add_transaction_costs(self, object proposal)

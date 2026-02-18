@@ -35,6 +35,7 @@ from hummingbot.strategy.avellaneda_market_making.avellaneda_market_making_confi
 from hummingbot.strategy.avellaneda_market_making.a_skew import compute_a_skew_price
 from hummingbot.strategy.avellaneda_market_making.drift_regime import DriftRegimeConfig, DriftRegimeEstimator
 from hummingbot.strategy.avellaneda_market_making.inventory_gate import apply_cross_suppression, compute_inventory_gate
+from hummingbot.strategy.avellaneda_market_making.inventory_size import compute_inventory_stress, compute_size_multiplier
 from hummingbot.strategy.avellaneda_market_making.side_intensity_estimator import SideIntensityConfig, SideIntensityEstimator
 from hummingbot.strategy.conditional_execution_state import (
     RunAlwaysExecutionState,
@@ -139,6 +140,10 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._a_skew_price_effective = s_decimal_zero
         self._inventory_gate_value = s_decimal_one
         self._inventory_quote_value = s_decimal_zero
+        self._inventory_size_stress = s_decimal_zero
+        self._inventory_size_multiplier = s_decimal_one
+        self._inventory_size_base_amount = self._config_map.order_amount
+        self._inventory_size_adjusted_amount = self._config_map.order_amount
         self._prev_net_inventory_base = s_decimal_zero
         self._cross_suppress_until_ts = 0
         self._debug_csv_path = debug_csv_path
@@ -796,6 +801,17 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 lines.extend(["    " + line for line in side_main_df.to_string(index=False).split("\n")])
                 lines.extend(["    " + line for line in side_asym_df.to_string(index=False).split("\n")])
 
+        amount_quantum = market.get_order_size_quantum(trading_pair, Decimal(str(self._config_map.order_amount)))
+        amount_decimals = max(0, -amount_quantum.as_tuple().exponent) if amount_quantum > s_decimal_zero else 8
+        lines.extend([
+            "",
+            f"  Inventory Size Scaling: inv_quote={Decimal(str(self._inventory_quote_value)):.4f} "
+            f"stress={Decimal(str(self._inventory_size_stress)):.4f} "
+            f"size_mult={Decimal(str(self._inventory_size_multiplier)):.4f} "
+            f"amount={Decimal(str(self._inventory_size_base_amount)):.{amount_decimals}f}"
+            f"->{Decimal(str(self._inventory_size_adjusted_amount)):.{amount_decimals}f}"
+        ])
+
         assets_df = map_df_to_str(self.pure_mm_assets_df(True))
         first_col_length = max(*assets_df[0].apply(len))
         df_lines = assets_df.to_string(index=False, header=False,
@@ -933,6 +949,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 proposal = self.c_create_base_proposal()
                 # 4. Apply functions that modify orders amount
                 self.c_apply_order_amount_eta_transformation(proposal)
+                self.c_apply_inventory_size_scaling(proposal)
                 # 5. Apply functions that modify orders price
                 self.c_apply_order_price_modifiers(proposal)
                 # 6. Apply budget constraint, i.e. can't buy/sell more than what you have.
@@ -1563,6 +1580,82 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
     def apply_order_amount_eta_transformation(self, proposal: Proposal):
         self.c_apply_order_amount_eta_transformation(proposal)
+
+    cdef c_apply_inventory_size_scaling(self, object proposal):
+        cdef:
+            ExchangeBase market = self._market_info.market
+            str trading_pair = self._market_info.trading_pair
+            object q_target
+            object ref_price
+            object net_base_inventory
+            object inv_quote
+            object cap_quote
+            object mult_decimal
+            object scaled_size
+            object base_total = s_decimal_zero
+            object adjusted_total = s_decimal_zero
+            int n_orders = 0
+            bint scaling_enabled = bool(self._config_map.inventory_size_scaling_enabled)
+            double stress_value = 0.0
+            double mult_value = 1.0
+
+        if proposal is None:
+            return
+
+        ref_price = Decimal(str(self.get_price()))
+        if ref_price <= s_decimal_zero:
+            self._inventory_quote_value = s_decimal_zero
+            self._inventory_size_stress = s_decimal_zero
+            self._inventory_size_multiplier = s_decimal_one
+            self._inventory_size_base_amount = self._config_map.order_amount
+            self._inventory_size_adjusted_amount = self._config_map.order_amount
+            return
+
+        q_target = Decimal(str(self.c_calculate_target_inventory()))
+        net_base_inventory = market.get_balance(self.base_asset) - q_target
+        inv_quote = abs(net_base_inventory * ref_price)
+        cap_quote = Decimal(str(self._config_map.inventory_risk_cap_quote))
+        stress_value = compute_inventory_stress(float(inv_quote), float(cap_quote))
+        if scaling_enabled:
+            mult_value = compute_size_multiplier(
+                stress=stress_value,
+                m_min=float(self._config_map.inventory_size_min_mult),
+                beta=float(self._config_map.inventory_size_beta),
+            )
+
+        mult_decimal = Decimal(str(mult_value))
+        self._inventory_quote_value = inv_quote
+        self._inventory_size_stress = Decimal(str(stress_value))
+        self._inventory_size_multiplier = mult_decimal
+
+        for i, proposed in enumerate(proposal.buys):
+            base_total += proposal.buys[i].size
+            n_orders += 1
+            scaled_size = market.c_quantize_order_amount(trading_pair, proposal.buys[i].size * mult_decimal)
+            proposal.buys[i].size = scaled_size
+            adjusted_total += scaled_size
+        proposal.buys = [o for o in proposal.buys if o.size > 0]
+
+        for i, proposed in enumerate(proposal.sells):
+            base_total += proposal.sells[i].size
+            n_orders += 1
+            scaled_size = market.c_quantize_order_amount(trading_pair, proposal.sells[i].size * mult_decimal)
+            proposal.sells[i].size = scaled_size
+            adjusted_total += scaled_size
+        proposal.sells = [o for o in proposal.sells if o.size > 0]
+
+        if n_orders > 0:
+            self._inventory_size_base_amount = base_total / Decimal(str(n_orders))
+            self._inventory_size_adjusted_amount = adjusted_total / Decimal(str(n_orders))
+        else:
+            self._inventory_size_base_amount = self._config_map.order_amount
+            self._inventory_size_adjusted_amount = market.c_quantize_order_amount(
+                trading_pair,
+                self._config_map.order_amount * mult_decimal,
+            )
+
+    def apply_inventory_size_scaling(self, proposal: Proposal):
+        self.c_apply_inventory_size_scaling(proposal)
 
     cdef c_apply_add_transaction_costs(self, object proposal):
         cdef:
