@@ -1,6 +1,7 @@
+import ast
 from datetime import datetime, time
 from decimal import Decimal
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -367,6 +368,97 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         gt=0,
         json_schema_extra={"prompt": "Enter A-skew epsilon"},
     )
+    toxicity_enabled: bool = Field(
+        default=False,
+        description="Enable post-fill adverse-selection toxicity gate.",
+        json_schema_extra={"prompt": "Enable toxicity gate? (Yes/No)"},
+    )
+    toxicity_horizons_secs: List[int] = Field(
+        default_factory=lambda: [5, 10, 30],
+        description="Post-fill adverse-selection horizons (seconds).",
+        json_schema_extra={"prompt": "Enter toxicity horizons in seconds (e.g. [5,10,30])"},
+    )
+    toxicity_ewma_halflife_secs: float = Field(
+        default=120.0,
+        description="EWMA half-life for adverse selection estimates.",
+        gt=0,
+        json_schema_extra={"prompt": "Enter toxicity EWMA half-life (seconds)"},
+    )
+    toxicity_weights: Dict[int, Decimal] = Field(
+        default_factory=lambda: {5: Decimal("0.5"), 10: Decimal("0.3"), 30: Decimal("0.2")},
+        description="Weights by horizon for toxicity score aggregation.",
+        json_schema_extra={"prompt": "Enter toxicity weights by horizon (e.g. {5:0.5,10:0.3,30:0.2})"},
+    )
+    toxicity_trigger_bps: Decimal = Field(
+        default=Decimal("1.5"),
+        description="Toxicity trigger threshold in bps.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity trigger threshold (bps)"},
+    )
+    toxicity_release_bps: Decimal = Field(
+        default=Decimal("0.8"),
+        description="Toxicity release threshold in bps.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity release threshold (bps)"},
+    )
+    toxicity_confirm_secs: float = Field(
+        default=20.0,
+        description="Confirmation time for trigger/release transitions.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity confirmation time (seconds)"},
+    )
+    toxicity_hysteresis_secs: float = Field(
+        default=120.0,
+        description="Minimum time between toxicity regime switches.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity hysteresis time (seconds)"},
+    )
+    toxicity_hold_secs: float = Field(
+        default=60.0,
+        description="Pause hold duration after entering TOXIC in pause mode.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity hold time (seconds)"},
+    )
+    toxicity_action_mode: str = Field(
+        default="widen_only",
+        description="Action mode when toxicity is active.",
+        json_schema_extra={"prompt": "Choose toxicity action mode (widen_only/widen_and_shrink/pause_quote)"},
+    )
+    toxicity_spread_mult_min: Decimal = Field(
+        default=Decimal("1.0"),
+        description="Minimum spread multiplier under toxicity gate.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity minimum spread multiplier"},
+    )
+    toxicity_spread_mult_max: Decimal = Field(
+        default=Decimal("4.0"),
+        description="Maximum spread multiplier under toxicity gate.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity maximum spread multiplier"},
+    )
+    toxicity_size_mult_min: Decimal = Field(
+        default=Decimal("0.2"),
+        description="Minimum size multiplier under toxicity shrink mode.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity minimum size multiplier"},
+    )
+    toxicity_size_mult_max: Decimal = Field(
+        default=Decimal("1.0"),
+        description="Maximum size multiplier under toxicity shrink mode.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter toxicity maximum size multiplier"},
+    )
+    toxicity_curve_power: Decimal = Field(
+        default=Decimal("1.0"),
+        description="Convexity power for toxicity action scaling.",
+        gt=0,
+        json_schema_extra={"prompt": "Enter toxicity curve power"},
+    )
+    toxicity_debug: bool = Field(
+        default=False,
+        description="Enable toxicity debug logging.",
+        json_schema_extra={"prompt": "Enable toxicity debug logs? (Yes/No)"},
+    )
     inventory_gate_enabled: bool = Field(
         default=True,
         description="Enable inventory-aware gating on A-skew.",
@@ -649,6 +741,8 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         "side_intensity_use_censoring",
         "side_intensity_debug_logging",
         "side_intensity_a_skew_enabled",
+        "toxicity_enabled",
+        "toxicity_debug",
         "inventory_gate_enabled",
         "inventory_cross_suppress_enabled",
         "inventory_size_scaling_enabled",
@@ -802,6 +896,94 @@ class AvellanedaMarketMakingConfigMap(BaseTradingStrategyConfigMap):
         if ret is not None:
             raise ValueError(ret)
         return v
+
+    @field_validator("toxicity_horizons_secs", mode="before")
+    @classmethod
+    def validate_toxicity_horizons_secs(cls, v):
+        parsed = v
+        if isinstance(v, str):
+            parsed = ast.literal_eval(v)
+        if not isinstance(parsed, (list, tuple, set)):
+            raise ValueError("toxicity_horizons_secs must be a list of positive integers")
+        horizons = []
+        for item in parsed:
+            ret = validate_int(str(item), min_value=0, inclusive=False)
+            if ret is not None:
+                raise ValueError(ret)
+            horizons.append(int(item))
+        if len(horizons) == 0:
+            raise ValueError("toxicity_horizons_secs cannot be empty")
+        return sorted(set(horizons))
+
+    @field_validator("toxicity_weights", mode="before")
+    @classmethod
+    def validate_toxicity_weights(cls, v):
+        parsed = v
+        if isinstance(v, str):
+            parsed = ast.literal_eval(v)
+        if not isinstance(parsed, dict):
+            raise ValueError("toxicity_weights must be a mapping of horizon->weight")
+        weights: Dict[int, Decimal] = {}
+        for key, value in parsed.items():
+            ret_h = validate_int(str(key), min_value=0, inclusive=False)
+            if ret_h is not None:
+                raise ValueError(ret_h)
+            ret_w = validate_decimal(str(value), min_value=Decimal("0"), inclusive=True)
+            if ret_w is not None:
+                raise ValueError(ret_w)
+            weights[int(key)] = Decimal(str(value))
+        if len(weights) == 0:
+            raise ValueError("toxicity_weights cannot be empty")
+        return weights
+
+    @field_validator("toxicity_ewma_halflife_secs", mode="before")
+    @classmethod
+    def validate_toxicity_halflife(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=False)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("toxicity_confirm_secs", "toxicity_hysteresis_secs", "toxicity_hold_secs", mode="before")
+    @classmethod
+    def validate_toxicity_non_negative_times(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator(
+        "toxicity_trigger_bps",
+        "toxicity_release_bps",
+        "toxicity_spread_mult_min",
+        "toxicity_spread_mult_max",
+        "toxicity_size_mult_min",
+        "toxicity_size_mult_max",
+        mode="before",
+    )
+    @classmethod
+    def validate_toxicity_non_negative_decimals(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=True)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("toxicity_curve_power", mode="before")
+    @classmethod
+    def validate_toxicity_curve_power(cls, v: str):
+        ret = validate_decimal(v, min_value=Decimal("0"), inclusive=False)
+        if ret is not None:
+            raise ValueError(ret)
+        return v
+
+    @field_validator("toxicity_action_mode", mode="before")
+    @classmethod
+    def validate_toxicity_action_mode(cls, v: str):
+        value = str(v).lower()
+        valid_values = {"widen_only", "widen_and_shrink", "pause_quote"}
+        if value not in valid_values:
+            raise ValueError("Invalid toxicity_action_mode, choose from ['widen_only', 'widen_and_shrink', 'pause_quote']")
+        return value
 
     @field_validator("inventory_gate_scale_pct", mode="before")
     @classmethod

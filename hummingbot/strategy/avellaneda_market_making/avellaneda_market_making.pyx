@@ -42,6 +42,7 @@ from hummingbot.strategy.avellaneda_market_making.inventory_size import (
     compute_size_multiplier,
 )
 from hummingbot.strategy.avellaneda_market_making.side_intensity_estimator import SideIntensityConfig, SideIntensityEstimator
+from hummingbot.strategy.avellaneda_market_making.toxicity_gate import REGIME_NORMAL, ToxicityGate, ToxicityGateConfig
 from hummingbot.strategy.conditional_execution_state import (
     RunAlwaysExecutionState,
     RunInTimeConditionalExecutionState
@@ -134,6 +135,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._side_intensity_estimator = None
         self._side_intensity_metrics = None
         self._side_intensity_last_log_ts = 0
+        self._toxicity_gate = None
+        self._toxicity_last_log_ts = 0
         self._last_delta_bid = s_decimal_zero
         self._last_delta_ask = s_decimal_zero
         self._a_skew_prev_price_smoothed = s_decimal_zero
@@ -155,6 +158,9 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._inventory_size_bid_amount = self._config_map.order_amount
         self._inventory_size_ask_amount = self._config_map.order_amount
         self._inventory_size_last_update_ts = 0
+        self._toxicity_spread_mult = s_decimal_one
+        self._toxicity_size_mult = s_decimal_one
+        self._toxicity_bps = s_decimal_zero
         self._prev_net_inventory_base = s_decimal_zero
         self._cross_suppress_until_ts = 0
         self._debug_csv_path = debug_csv_path
@@ -169,6 +175,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self.get_config_map_hanging_orders()
         self._drift_regime = DriftRegimeEstimator(self._drift_config_from_map())
         self._side_intensity_estimator = SideIntensityEstimator(self._side_intensity_config_from_map(), k_initial=float(self._kappa or 100), a_initial=1.0)
+        self._toxicity_gate = ToxicityGate(self._toxicity_config_from_map())
 
     def all_markets_ready(self):
         return all([market.ready for market in self._sb_markets])
@@ -494,6 +501,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             self._drift_regime.update_config(self._drift_config_from_map())
         if self._side_intensity_estimator is not None:
             self._side_intensity_estimator.update_config(self._side_intensity_config_from_map())
+        if self._toxicity_gate is not None:
+            self._toxicity_gate.update_config(self._toxicity_config_from_map())
 
     def _drift_config_from_map(self):
         return DriftRegimeConfig(
@@ -519,6 +528,34 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             k_max=float(self._config_map.side_intensity_k_max),
             min_events=int(self._config_map.side_intensity_min_events),
             use_censoring=bool(self._config_map.side_intensity_use_censoring),
+        )
+
+    def _toxicity_config_from_map(self):
+        horizons = [int(h) for h in self._config_map.toxicity_horizons_secs]
+        raw_weights = self._config_map.toxicity_weights
+        weights = {}
+        for horizon in horizons:
+            value = raw_weights.get(horizon)
+            if value is None:
+                value = raw_weights.get(str(horizon), Decimal("0"))
+            weights[horizon] = float(value)
+        return ToxicityGateConfig(
+            enabled=bool(self._config_map.toxicity_enabled),
+            horizons_secs=horizons,
+            ewma_halflife_secs=float(self._config_map.toxicity_ewma_halflife_secs),
+            weights=weights,
+            trigger_bps=float(self._config_map.toxicity_trigger_bps),
+            release_bps=float(self._config_map.toxicity_release_bps),
+            confirm_secs=float(self._config_map.toxicity_confirm_secs),
+            hysteresis_secs=float(self._config_map.toxicity_hysteresis_secs),
+            hold_secs=float(self._config_map.toxicity_hold_secs),
+            action_mode=str(self._config_map.toxicity_action_mode),
+            spread_mult_min=float(self._config_map.toxicity_spread_mult_min),
+            spread_mult_max=float(self._config_map.toxicity_spread_mult_max),
+            size_mult_min=float(self._config_map.toxicity_size_mult_min),
+            size_mult_max=float(self._config_map.toxicity_size_mult_max),
+            curve_power=float(self._config_map.toxicity_curve_power),
+            debug=bool(self._config_map.toxicity_debug),
         )
 
     def _side_delta_from_prices(self, order_price: Decimal, reservation_price: Decimal):
@@ -812,6 +849,22 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 lines.extend(["    " + line for line in side_main_df.to_string(index=False).split("\n")])
                 lines.extend(["    " + line for line in side_asym_df.to_string(index=False).split("\n")])
 
+        if bool(self._config_map.toxicity_enabled) and self._toxicity_gate is not None:
+            tox_ewma = self._toxicity_gate.ewma_adv_bps_by_horizon()
+            tox_counts = self._toxicity_gate.evaluated_counts(window_secs=600)
+            ewma_label = " ".join([f"{h}s:{v:.4f}" for h, v in tox_ewma.items()])
+            count_label = " ".join([f"{h}s:{c}" for h, c in tox_counts.items()])
+            lines.extend([
+                "",
+                f"  Toxicity Gate: regime={self._toxicity_gate.regime} "
+                f"tox_bps={Decimal(str(self._toxicity_gate.tox_bps)):.4f} "
+                f"spread_mult={Decimal(str(self._toxicity_gate.spread_mult)):.4f} "
+                f"size_mult={Decimal(str(self._toxicity_gate.size_mult)):.4f} "
+                f"pause={self._toxicity_gate.should_pause(float(self._current_timestamp))}",
+                f"    ewma_adv_bps[{ewma_label}]",
+                f"    eval_counts_10m[{count_label}]",
+            ])
+
         amount_quantum = market.get_order_size_quantum(trading_pair, Decimal(str(self._config_map.order_amount)))
         amount_decimals = max(0, -amount_quantum.as_tuple().exponent) if amount_quantum > s_decimal_zero else 8
         lines.extend([
@@ -971,6 +1024,12 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 self.c_apply_budget_constraint(proposal)
 
                 self.c_cancel_active_orders(proposal)
+                if (
+                    self._toxicity_gate is not None
+                    and bool(self._config_map.toxicity_enabled)
+                    and self._toxicity_gate.should_pause(float(self._current_timestamp))
+                ):
+                    proposal = None
 
         if self.c_to_create_orders(proposal):
             self.c_execute_orders_proposal(proposal)
@@ -985,6 +1044,38 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         price = self.get_price()
         self._avg_vol.add_sample(price)
         self._trading_intensity.calculate(timestamp)
+        if self._toxicity_gate is not None:
+            self._toxicity_gate.update(now=float(timestamp), mid_price=float(price))
+            self._toxicity_spread_mult = Decimal(str(self._toxicity_gate.spread_mult))
+            self._toxicity_size_mult = Decimal(str(self._toxicity_gate.size_mult))
+            self._toxicity_bps = Decimal(str(self._toxicity_gate.tox_bps))
+            if (
+                bool(self._config_map.toxicity_enabled)
+                and bool(self._config_map.toxicity_debug)
+                and (timestamp - self._toxicity_last_log_ts) >= 60
+            ):
+                self._toxicity_last_log_ts = timestamp
+                ewma_str = ", ".join(
+                    [
+                        f"{h}s:{v:.4f}"
+                        for h, v in self._toxicity_gate.ewma_adv_bps_by_horizon().items()
+                    ]
+                )
+                counts_str = ", ".join(
+                    [
+                        f"{h}s:{c}"
+                        for h, c in self._toxicity_gate.evaluated_counts(window_secs=600).items()
+                    ]
+                )
+                self.logger().info(
+                    "Toxicity telemetry: "
+                    f"regime={self._toxicity_gate.regime} tox_bps={self._toxicity_gate.tox_bps:.4f} "
+                    f"spread_mult={self._toxicity_gate.spread_mult:.4f} "
+                    f"size_mult={self._toxicity_gate.size_mult:.4f} "
+                    f"pause={self._toxicity_gate.should_pause(float(timestamp))} "
+                    f"ewma_adv_bps=[{ewma_str}] "
+                    f"eval_counts_10m=[{counts_str}]"
+                )
         # Calculate adjustment factor to have 0.01% of inventory resolution
         base_balance = market.get_balance(base_asset)
         quote_balance = market.get_balance(quote_asset)
@@ -1211,6 +1302,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             delta_common = self.gamma * vol * time_left_fraction / Decimal("2")
             delta_bid = delta_common + Decimal(s_decimal_one + self.gamma / k_bid).ln() / self.gamma
             delta_ask = delta_common + Decimal(s_decimal_one + self.gamma / k_ask).ln() / self.gamma
+            toxicity_spread_mult = s_decimal_one
+            if self._toxicity_gate is not None and bool(self._config_map.toxicity_enabled):
+                toxicity_spread_mult = Decimal(str(self._toxicity_gate.spread_mult))
+            delta_bid *= toxicity_spread_mult
+            delta_ask *= toxicity_spread_mult
             self._last_delta_bid = delta_bid
             self._last_delta_ask = delta_ask
             self._optimal_spread = delta_bid + delta_ask
@@ -1618,6 +1714,7 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             double mult_value = 1.0
             double bid_mult_value = 1.0
             double ask_mult_value = 1.0
+            double toxicity_size_mult_value = 1.0
 
         if proposal is None:
             return
@@ -1671,6 +1768,9 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 bias_k=float(self._config_map.size_dir_bias_k),
                 enabled=dir_bias_enabled,
             )
+        if self._toxicity_gate is not None and bool(self._config_map.toxicity_enabled):
+            toxicity_size_mult_value = float(self._toxicity_gate.size_mult)
+        mult_value *= toxicity_size_mult_value
 
         size_mult_decimal = Decimal(str(mult_value))
         bid_mult_decimal = Decimal(str(bid_mult_value))
@@ -1739,6 +1839,17 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         if market_info is not None:
             limit_order_record = self._sb_order_tracker.c_get_shadow_limit_order(order_id)
             order_fill_record = (limit_order_record, order_filled_event)
+            if self._toxicity_gate is not None and bool(self._config_map.toxicity_enabled):
+                fill_price = getattr(order_filled_event, "price", None)
+                if fill_price is None and limit_order_record is not None:
+                    fill_price = limit_order_record.price
+                fill_ts = float(getattr(order_filled_event, "timestamp", self._current_timestamp))
+                if fill_price is not None:
+                    self._toxicity_gate.on_fill(
+                        trade_type=order_filled_event.trade_type,
+                        fill_price=float(fill_price),
+                        timestamp=fill_ts,
+                    )
 
             if order_filled_event.trade_type is TradeType.BUY:
                 if self._logging_options & self.OPTION_LOG_MAKER_ORDER_FILLED:
@@ -2015,7 +2126,11 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                                        'eta',
                                        'volatility',
                                        'mid_price_variance',
-                                       'inventory_target_pct')])
+                                       'inventory_target_pct',
+                                       'toxicity_bps',
+                                       'toxicity_regime',
+                                       'toxicity_spread_mult',
+                                       'toxicity_size_mult')])
             df_header.to_csv(self._debug_csv_path, mode='a', header=False, index=False)
 
         if self._execution_state.time_left is not None and self._execution_state.closing_time is not None:
@@ -2042,5 +2157,9 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                             self.eta,
                             vol,
                             mid_price_variance,
-                            self.inventory_target_base_pct)])
+                            self.inventory_target_base_pct,
+                            self._toxicity_bps,
+                            self._toxicity_gate.regime if self._toxicity_gate is not None else REGIME_NORMAL,
+                            self._toxicity_spread_mult,
+                            self._toxicity_size_mult)])
         df.to_csv(self._debug_csv_path, mode='a', header=False, index=False)

@@ -55,6 +55,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         object _side_intensity_estimator
         object _side_intensity_metrics
         double _side_intensity_last_log_ts
+        object _toxicity_gate
+        double _toxicity_last_log_ts
         object _last_delta_bid
         object _last_delta_ask
         object _a_skew_prev_price_smoothed
@@ -76,6 +78,9 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         object _inventory_size_bid_amount
         object _inventory_size_ask_amount
         double _inventory_size_last_update_ts
+        object _toxicity_spread_mult
+        object _toxicity_size_mult
+        object _toxicity_bps
         object _prev_net_inventory_base
         double _cross_suppress_until_ts
         str _debug_csv_path
