@@ -7,11 +7,11 @@ The toxicity gate measures post-fill adverse selection and can widen spreads, sh
 ### How it works
 
 1. For each maker fill, the gate evaluates adverse selection at configured horizons `h`:
-   - BUY fill: `adv_bps(h) = 1e4 * (mid(t+h) - p_fill) / p_fill`
-   - SELL fill: `adv_bps(h) = 1e4 * (p_fill - mid(t+h)) / p_fill`
-2. Each horizon keeps an EWMA of `adv_bps`.
+   - BUY fill loss: `loss_bps(h) = max(0, 1e4 * (p_fill - mid(t+h)) / p_fill)`
+   - SELL fill loss: `loss_bps(h) = max(0, 1e4 * (mid(t+h) - p_fill) / p_fill)`
+2. Each horizon keeps an EWMA of `loss_bps`.
 3. Toxicity score is aggregated as:
-   - `tox_bps = sum_h weight_h * max(0, -ewma_adv_bps(h))`
+   - `tox_bps = sum_h weight_h * ewma_loss_bps(h)`
 4. A hysteresis state machine toggles between `NORMAL` and `TOXIC`.
 
 ### Key configuration
@@ -37,3 +37,4 @@ The toxicity gate measures post-fill adverse selection and can widen spreads, sh
 - Side-specific Avellaneda spread offsets are multiplied by the toxicity spread multiplier.
 - Order sizes are multiplied by the toxicity size multiplier when mode is `widen_and_shrink`.
 - In `pause_quote` mode, new order creation is suppressed for `toxicity_hold_secs` after entering `TOXIC`.
+- Under severe toxicity (`tox_bps >= 2 * trigger`) with high inventory stress (> 0.6), the dominant toxic side is temporarily suppressed for `toxicity_hold_secs`.

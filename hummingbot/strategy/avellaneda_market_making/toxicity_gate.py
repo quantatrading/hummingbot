@@ -1,3 +1,4 @@
+from bisect import bisect_left
 import heapq
 import math
 from collections import deque
@@ -66,9 +67,12 @@ class ToxicityGate:
     def __init__(self, config: ToxicityGateConfig):
         self._config = config.normalized()
         self._pending: List[Tuple[float, int, int, str, float]] = []
+        self._mid_history: Deque[Tuple[float, float]] = deque()
         self._fill_seq: int = 0
-        self._ewma_adv_bps: Dict[int, float] = {}
+        self._ewma_loss_bps: Dict[int, float] = {}
         self._ewma_last_ts: Dict[int, float] = {}
+        self._side_ewma_loss_bps: Dict[str, float] = {}
+        self._side_ewma_last_ts: Dict[str, float] = {}
         self._evaluated_ts: Dict[int, Deque[float]] = {h: deque() for h in self._config.horizons_secs}
 
         self._tox_bps: float = 0.0
@@ -81,13 +85,19 @@ class ToxicityGate:
         self._above_trigger_since: Optional[float] = None
         self._below_release_since: Optional[float] = None
         self._last_switch_ts: Optional[float] = None
+        self._last_loss_side: Optional[str] = None
+
+        self._suppressed_side: Optional[str] = None
+        self._suppress_until_ts: float = 0.0
+        self._missing_mid_fallbacks_last_update: int = 0
+        self._missing_mid_fallbacks_total: int = 0
 
     def update_config(self, config: ToxicityGateConfig):
         previous_horizons = set(self._config.horizons_secs)
         self._config = config.normalized()
         current_horizons = set(self._config.horizons_secs)
 
-        self._ewma_adv_bps = {h: v for h, v in self._ewma_adv_bps.items() if h in current_horizons}
+        self._ewma_loss_bps = {h: v for h, v in self._ewma_loss_bps.items() if h in current_horizons}
         self._ewma_last_ts = {h: v for h, v in self._ewma_last_ts.items() if h in current_horizons}
 
         new_eval_ts: Dict[int, Deque[float]] = {}
@@ -119,8 +129,12 @@ class ToxicityGate:
     def pause_until_ts(self) -> float:
         return self._pause_until_ts
 
+    def ewma_loss_bps_by_horizon(self) -> Dict[int, float]:
+        return {h: self._ewma_loss_bps.get(h, 0.0) for h in self._config.horizons_secs}
+
+    # Backward-compatible alias kept for strategy/status callers.
     def ewma_adv_bps_by_horizon(self) -> Dict[int, float]:
-        return {h: self._ewma_adv_bps.get(h, 0.0) for h in self._config.horizons_secs}
+        return self.ewma_loss_bps_by_horizon()
 
     def evaluated_counts(self, window_secs: float = _WINDOW_SECS) -> Dict[int, int]:
         counts: Dict[int, int] = {}
@@ -129,6 +143,31 @@ class ToxicityGate:
             timestamps = self._evaluated_ts.get(horizon, deque())
             counts[horizon] = sum(1 for ts in timestamps if ts >= cutoff)
         return counts
+
+    def missing_mid_fallbacks_last_update(self) -> int:
+        return self._missing_mid_fallbacks_last_update
+
+    def missing_mid_fallbacks_total(self) -> int:
+        return self._missing_mid_fallbacks_total
+
+    def suppressed_side(self, now: float) -> Optional[str]:
+        if float(now) >= self._suppress_until_ts:
+            self._suppressed_side = None
+            self._suppress_until_ts = 0.0
+            return None
+        return self._suppressed_side
+
+    def suppression_active(self, now: float) -> bool:
+        return self.suppressed_side(now) is not None
+
+    def is_side_suppressed(self, side: str, now: float) -> bool:
+        normalized = self._normalize_trade_side(side)
+        if normalized is None:
+            return False
+        return self.suppressed_side(now) == normalized
+
+    def suppression_until_ts(self) -> float:
+        return self._suppress_until_ts
 
     def should_pause(self, now: float) -> bool:
         if not self._config.enabled:
@@ -152,48 +191,112 @@ class ToxicityGate:
             due_ts = ts + float(horizon)
             heapq.heappush(self._pending, (due_ts, self._fill_seq, horizon, side, price))
 
-    def update(self, now: float, mid_price: Optional[float]):
+    def update(self, now: float, mid_price: Optional[float], inventory_stress: float = 0.0):
         now_ts = float(now)
         mid = float(mid_price) if mid_price is not None else 0.0
+        self._missing_mid_fallbacks_last_update = 0
 
         if not self._config.enabled:
             self._tox_bps = 0.0
             self._regime = REGIME_NORMAL
             self._spread_mult = 1.0
             self._size_mult = 1.0
+            self._suppressed_side = None
+            self._suppress_until_ts = 0.0
             self._last_update_ts = now_ts
             return
 
         self._last_update_ts = now_ts
+        if mid > 0:
+            self._append_mid_sample(timestamp=now_ts, mid_price=mid)
+
         while self._pending and self._pending[0][0] <= now_ts:
             due_ts, _, horizon, side, fill_price = heapq.heappop(self._pending)
-            if mid <= 0 or fill_price <= 0:
+            if fill_price <= 0:
                 continue
-            adv_bps = self._adverse_selection_bps(side=side, fill_price=fill_price, mid_price=mid)
-            self._update_horizon_ewma(horizon=horizon, value=adv_bps, timestamp=now_ts)
+
+            future_mid, used_fallback = self._resolve_future_mid(due_ts)
+            if future_mid is None or future_mid <= 0:
+                self._missing_mid_fallbacks_last_update += 1
+                self._missing_mid_fallbacks_total += 1
+                continue
+            if used_fallback:
+                self._missing_mid_fallbacks_last_update += 1
+                self._missing_mid_fallbacks_total += 1
+
+            loss_bps = self._adverse_selection_loss_bps(side=side, fill_price=fill_price, mid_price=future_mid)
+            if loss_bps > 0:
+                self._last_loss_side = side
+
+            self._update_horizon_ewma(horizon=horizon, value=loss_bps, timestamp=now_ts)
+            self._update_side_ewma(side=side, value=loss_bps, timestamp=now_ts)
             self._record_evaluation(horizon=horizon, timestamp=now_ts)
 
         self._tox_bps = self._compute_toxicity_bps()
         self._update_regime(now_ts)
         self._update_actions()
+        self._update_severe_side_suppression(
+            now_ts=now_ts,
+            inventory_stress=max(0.0, min(1.0, float(inventory_stress))),
+        )
 
-    def _adverse_selection_bps(self, side: str, fill_price: float, mid_price: float) -> float:
+    def _append_mid_sample(self, timestamp: float, mid_price: float):
+        self._mid_history.append((float(timestamp), float(mid_price)))
+        max_horizon = float(max(self._config.horizons_secs)) if len(self._config.horizons_secs) > 0 else 0.0
+        cutoff = float(timestamp) - max(self._WINDOW_SECS, 2.0 * max_horizon, 60.0)
+        while self._mid_history and self._mid_history[0][0] < cutoff:
+            self._mid_history.popleft()
+
+    def _resolve_future_mid(self, due_ts: float) -> Tuple[Optional[float], bool]:
+        if len(self._mid_history) == 0:
+            return None, True
+
+        entries = list(self._mid_history)
+        timestamps = [entry[0] for entry in entries]
+        idx = bisect_left(timestamps, float(due_ts))
+
+        if idx >= len(entries):
+            # Missing future timestamp sample, fallback to the latest available mid.
+            return entries[-1][1], True
+        if idx == 0:
+            return entries[0][1], False
+
+        left_ts, left_mid = entries[idx - 1]
+        right_ts, right_mid = entries[idx]
+        if abs(float(due_ts) - left_ts) <= abs(right_ts - float(due_ts)):
+            return left_mid, False
+        return right_mid, False
+
+    def _adverse_selection_loss_bps(self, side: str, fill_price: float, mid_price: float) -> float:
         if side == "buy":
-            return 1e4 * (mid_price - fill_price) / fill_price
-        return 1e4 * (fill_price - mid_price) / fill_price
+            return max(0.0, 1e4 * (fill_price - mid_price) / fill_price)
+        return max(0.0, 1e4 * (mid_price - fill_price) / fill_price)
 
     def _update_horizon_ewma(self, horizon: int, value: float, timestamp: float):
-        if horizon not in self._ewma_adv_bps:
-            self._ewma_adv_bps[horizon] = float(value)
+        if horizon not in self._ewma_loss_bps:
+            self._ewma_loss_bps[horizon] = float(value)
             self._ewma_last_ts[horizon] = float(timestamp)
             return
 
         last_ts = self._ewma_last_ts.get(horizon, float(timestamp))
         dt_secs = max(0.0, float(timestamp) - float(last_ts))
         alpha = 1.0 - math.exp(-math.log(2.0) * dt_secs / self._config.ewma_halflife_secs)
-        prev = self._ewma_adv_bps[horizon]
-        self._ewma_adv_bps[horizon] = alpha * float(value) + (1.0 - alpha) * float(prev)
+        prev = self._ewma_loss_bps[horizon]
+        self._ewma_loss_bps[horizon] = float(prev) + alpha * (float(value) - float(prev))
         self._ewma_last_ts[horizon] = float(timestamp)
+
+    def _update_side_ewma(self, side: str, value: float, timestamp: float):
+        if side not in self._side_ewma_loss_bps:
+            self._side_ewma_loss_bps[side] = float(value)
+            self._side_ewma_last_ts[side] = float(timestamp)
+            return
+
+        last_ts = self._side_ewma_last_ts.get(side, float(timestamp))
+        dt_secs = max(0.0, float(timestamp) - float(last_ts))
+        alpha = 1.0 - math.exp(-math.log(2.0) * dt_secs / self._config.ewma_halflife_secs)
+        prev = self._side_ewma_loss_bps[side]
+        self._side_ewma_loss_bps[side] = float(prev) + alpha * (float(value) - float(prev))
+        self._side_ewma_last_ts[side] = float(timestamp)
 
     def _record_evaluation(self, horizon: int, timestamp: float):
         q = self._evaluated_ts.setdefault(horizon, deque())
@@ -205,11 +308,11 @@ class ToxicityGate:
     def _compute_toxicity_bps(self) -> float:
         toxicity = 0.0
         for horizon in self._config.horizons_secs:
-            ewma = self._ewma_adv_bps.get(horizon)
+            ewma = self._ewma_loss_bps.get(horizon)
             if ewma is None:
                 continue
             weight = self._config.weights.get(horizon, 0.0)
-            toxicity += weight * max(0.0, -float(ewma))
+            toxicity += weight * max(0.0, float(ewma))
         return max(0.0, toxicity)
 
     def _can_switch(self, now_ts: float) -> bool:
@@ -218,13 +321,13 @@ class ToxicityGate:
         return (now_ts - self._last_switch_ts) >= self._config.hysteresis_secs
 
     def _update_regime(self, now_ts: float):
-        if self._tox_bps > self._config.trigger_bps:
+        if self._tox_bps >= self._config.trigger_bps:
             if self._above_trigger_since is None:
                 self._above_trigger_since = now_ts
         else:
             self._above_trigger_since = None
 
-        if self._tox_bps < self._config.release_bps:
+        if self._tox_bps <= self._config.release_bps:
             if self._below_release_since is None:
                 self._below_release_since = now_ts
         else:
@@ -257,20 +360,45 @@ class ToxicityGate:
         if self._regime != REGIME_TOXIC:
             return
 
-        trigger = max(self._config.trigger_bps, 1e-9)
-        x = max(0.0, min(1.0, (self._tox_bps - trigger) / trigger))
-        x_curve = x ** self._config.curve_power
+        release = max(self._config.release_bps, 0.0)
+        trigger = max(self._config.trigger_bps, release + 1e-9)
+        width = max(trigger - release, 1e-9)
+        x = max(0.0, min(1.0, (self._tox_bps - release) / width))
+        y = x ** self._config.curve_power
 
         spread_min = min(self._config.spread_mult_min, self._config.spread_mult_max)
         spread_max = max(self._config.spread_mult_min, self._config.spread_mult_max)
-        self._spread_mult = spread_min + (spread_max - spread_min) * x_curve
+        self._spread_mult = spread_min + (spread_max - spread_min) * y
 
         if self._config.action_mode == "widen_and_shrink":
             size_min = min(self._config.size_mult_min, self._config.size_mult_max)
             size_max = max(self._config.size_mult_min, self._config.size_mult_max)
-            self._size_mult = size_max - (size_max - size_min) * x_curve
+            self._size_mult = size_max - (size_max - size_min) * y
         else:
             self._size_mult = 1.0
+
+    def _dominant_toxic_side(self) -> Optional[str]:
+        buy_loss = max(0.0, float(self._side_ewma_loss_bps.get("buy", 0.0)))
+        sell_loss = max(0.0, float(self._side_ewma_loss_bps.get("sell", 0.0)))
+        if buy_loss <= 0 and sell_loss <= 0:
+            return self._last_loss_side
+        if abs(buy_loss - sell_loss) <= 1e-12:
+            return self._last_loss_side
+        return "buy" if buy_loss > sell_loss else "sell"
+
+    def _update_severe_side_suppression(self, now_ts: float, inventory_stress: float):
+        trigger = max(self._config.trigger_bps, 1e-9)
+        severe = self._tox_bps >= (2.0 * trigger) and inventory_stress > 0.6
+        if severe:
+            dominant_side = self._dominant_toxic_side()
+            if dominant_side is not None:
+                self._suppressed_side = dominant_side
+                self._suppress_until_ts = max(self._suppress_until_ts, now_ts + self._config.hold_secs)
+                return
+
+        if now_ts >= self._suppress_until_ts:
+            self._suppressed_side = None
+            self._suppress_until_ts = 0.0
 
     def _normalize_trade_side(self, trade_type) -> Optional[str]:
         value = ""

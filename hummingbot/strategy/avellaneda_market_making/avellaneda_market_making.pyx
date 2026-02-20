@@ -850,19 +850,23 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 lines.extend(["    " + line for line in side_asym_df.to_string(index=False).split("\n")])
 
         if bool(self._config_map.toxicity_enabled) and self._toxicity_gate is not None:
-            tox_ewma = self._toxicity_gate.ewma_adv_bps_by_horizon()
+            tox_ewma = self._toxicity_gate.ewma_loss_bps_by_horizon()
             tox_counts = self._toxicity_gate.evaluated_counts(window_secs=600)
             ewma_label = " ".join([f"{h}s:{v:.4f}" for h, v in tox_ewma.items()])
             count_label = " ".join([f"{h}s:{c}" for h, c in tox_counts.items()])
+            suppressed_side = self._toxicity_gate.suppressed_side(float(self._current_timestamp)) or "none"
             lines.extend([
                 "",
                 f"  Toxicity Gate: regime={self._toxicity_gate.regime} "
                 f"tox_bps={Decimal(str(self._toxicity_gate.tox_bps)):.4f} "
                 f"spread_mult={Decimal(str(self._toxicity_gate.spread_mult)):.4f} "
                 f"size_mult={Decimal(str(self._toxicity_gate.size_mult)):.4f} "
-                f"pause={self._toxicity_gate.should_pause(float(self._current_timestamp))}",
-                f"    ewma_adv_bps[{ewma_label}]",
-                f"    eval_counts_10m[{count_label}]",
+                f"pause={self._toxicity_gate.should_pause(float(self._current_timestamp))} "
+                f"suppressed_side={suppressed_side} "
+                f"suppress_until={self._toxicity_gate.suppression_until_ts():.0f}",
+                f"    ewma_loss_bps[{ewma_label}]",
+                f"    eval_counts_10m[{count_label}] "
+                f"missing_mid_fallbacks={self._toxicity_gate.missing_mid_fallbacks_last_update()}",
             ])
 
         amount_quantum = market.get_order_size_quantum(trading_pair, Decimal(str(self._config_map.order_amount)))
@@ -1018,10 +1022,12 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 # 4. Apply functions that modify orders amount
                 self.c_apply_inventory_size_scaling(proposal)
                 self.c_apply_order_amount_eta_transformation(proposal)
+                self.c_apply_toxicity_size_scaling(proposal)
                 # 5. Apply functions that modify orders price
                 self.c_apply_order_price_modifiers(proposal)
                 # 6. Apply budget constraint, i.e. can't buy/sell more than what you have.
                 self.c_apply_budget_constraint(proposal)
+                self.c_apply_toxicity_side_suppression(proposal)
 
                 self.c_cancel_active_orders(proposal)
                 if (
@@ -1045,20 +1051,33 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
         self._avg_vol.add_sample(price)
         self._trading_intensity.calculate(timestamp)
         if self._toxicity_gate is not None:
-            self._toxicity_gate.update(now=float(timestamp), mid_price=float(price))
+            toxicity_inventory_stress = 0.0
+            if price > 0:
+                q_target = Decimal(str(self.c_calculate_target_inventory()))
+                net_base_inventory = market.get_balance(base_asset) - q_target
+                cap_quote = Decimal(str(self._config_map.inventory_risk_cap_quote))
+                toxicity_inventory_stress = compute_inventory_stress(
+                    float(abs(net_base_inventory * Decimal(str(price)))),
+                    float(cap_quote),
+                )
+            self._toxicity_gate.update(
+                now=float(timestamp),
+                mid_price=float(price),
+                inventory_stress=float(toxicity_inventory_stress),
+            )
             self._toxicity_spread_mult = Decimal(str(self._toxicity_gate.spread_mult))
             self._toxicity_size_mult = Decimal(str(self._toxicity_gate.size_mult))
             self._toxicity_bps = Decimal(str(self._toxicity_gate.tox_bps))
             if (
                 bool(self._config_map.toxicity_enabled)
                 and bool(self._config_map.toxicity_debug)
-                and (timestamp - self._toxicity_last_log_ts) >= 60
+                and timestamp != self._toxicity_last_log_ts
             ):
                 self._toxicity_last_log_ts = timestamp
                 ewma_str = ", ".join(
                     [
                         f"{h}s:{v:.4f}"
-                        for h, v in self._toxicity_gate.ewma_adv_bps_by_horizon().items()
+                        for h, v in self._toxicity_gate.ewma_loss_bps_by_horizon().items()
                     ]
                 )
                 counts_str = ", ".join(
@@ -1067,13 +1086,17 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                         for h, c in self._toxicity_gate.evaluated_counts(window_secs=600).items()
                     ]
                 )
+                suppressed_side = self._toxicity_gate.suppressed_side(float(timestamp)) or "none"
                 self.logger().info(
                     "Toxicity telemetry: "
                     f"regime={self._toxicity_gate.regime} tox_bps={self._toxicity_gate.tox_bps:.4f} "
                     f"spread_mult={self._toxicity_gate.spread_mult:.4f} "
                     f"size_mult={self._toxicity_gate.size_mult:.4f} "
                     f"pause={self._toxicity_gate.should_pause(float(timestamp))} "
-                    f"ewma_adv_bps=[{ewma_str}] "
+                    f"suppressed_side={suppressed_side} "
+                    f"suppress_until={self._toxicity_gate.suppression_until_ts():.0f} "
+                    f"missing_mid_fallbacks={self._toxicity_gate.missing_mid_fallbacks_last_update()} "
+                    f"ewma_loss_bps=[{ewma_str}] "
                     f"eval_counts_10m=[{counts_str}]"
                 )
         # Calculate adjustment factor to have 0.01% of inventory resolution
@@ -1714,7 +1737,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
             double mult_value = 1.0
             double bid_mult_value = 1.0
             double ask_mult_value = 1.0
-            double toxicity_size_mult_value = 1.0
 
         if proposal is None:
             return
@@ -1768,9 +1790,6 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
                 bias_k=float(self._config_map.size_dir_bias_k),
                 enabled=dir_bias_enabled,
             )
-        if self._toxicity_gate is not None and bool(self._config_map.toxicity_enabled):
-            toxicity_size_mult_value = float(self._toxicity_gate.size_mult)
-        mult_value *= toxicity_size_mult_value
 
         size_mult_decimal = Decimal(str(mult_value))
         bid_mult_decimal = Decimal(str(bid_mult_value))
@@ -1812,6 +1831,75 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
 
     def apply_inventory_size_scaling(self, proposal: Proposal):
         self.c_apply_inventory_size_scaling(proposal)
+
+    cdef c_apply_toxicity_size_scaling(self, object proposal):
+        cdef:
+            ExchangeBase market = self._market_info.market
+            str trading_pair = self._market_info.trading_pair
+            object scaled_size
+            object toxicity_size_mult = s_decimal_one
+
+        if proposal is None:
+            return
+        if self._toxicity_gate is None or not bool(self._config_map.toxicity_enabled):
+            return
+
+        toxicity_size_mult = Decimal(str(self._toxicity_gate.size_mult))
+        if toxicity_size_mult == s_decimal_one:
+            return
+        if toxicity_size_mult <= s_decimal_zero:
+            proposal.buys = []
+            proposal.sells = []
+            self._inventory_size_bid_amount = s_decimal_zero
+            self._inventory_size_ask_amount = s_decimal_zero
+            self._inventory_size_adjusted_amount = s_decimal_zero
+            return
+
+        self._inventory_size_bid_amount = market.c_quantize_order_amount(
+            trading_pair, self._inventory_size_bid_amount * toxicity_size_mult
+        )
+        self._inventory_size_ask_amount = market.c_quantize_order_amount(
+            trading_pair, self._inventory_size_ask_amount * toxicity_size_mult
+        )
+        self._inventory_size_adjusted_amount = (
+            self._inventory_size_bid_amount + self._inventory_size_ask_amount
+        ) / Decimal("2")
+
+        for i, proposed in enumerate(proposal.buys):
+            scaled_size = market.c_quantize_order_amount(
+                trading_pair,
+                proposal.buys[i].size * toxicity_size_mult,
+            )
+            proposal.buys[i].size = scaled_size
+        proposal.buys = [o for o in proposal.buys if o.size > 0]
+
+        for i, proposed in enumerate(proposal.sells):
+            scaled_size = market.c_quantize_order_amount(
+                trading_pair,
+                proposal.sells[i].size * toxicity_size_mult,
+            )
+            proposal.sells[i].size = scaled_size
+        proposal.sells = [o for o in proposal.sells if o.size > 0]
+
+    def apply_toxicity_size_scaling(self, proposal: Proposal):
+        self.c_apply_toxicity_size_scaling(proposal)
+
+    cdef c_apply_toxicity_side_suppression(self, object proposal):
+        cdef:
+            double now_ts = float(self._current_timestamp)
+
+        if proposal is None:
+            return
+        if self._toxicity_gate is None or not bool(self._config_map.toxicity_enabled):
+            return
+
+        if self._toxicity_gate.is_side_suppressed("buy", now_ts):
+            proposal.buys = []
+        if self._toxicity_gate.is_side_suppressed("sell", now_ts):
+            proposal.sells = []
+
+    def apply_toxicity_side_suppression(self, proposal: Proposal):
+        self.c_apply_toxicity_side_suppression(proposal)
 
     cdef c_apply_add_transaction_costs(self, object proposal):
         cdef:

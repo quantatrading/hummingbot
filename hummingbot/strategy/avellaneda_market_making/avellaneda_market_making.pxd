@@ -100,6 +100,8 @@ cdef class AvellanedaMarketMakingStrategy(StrategyBase):
     cdef c_apply_order_price_modifiers(self, object proposal)
     cdef c_apply_order_amount_eta_transformation(self, object proposal)
     cdef c_apply_inventory_size_scaling(self, object proposal)
+    cdef c_apply_toxicity_size_scaling(self, object proposal)
+    cdef c_apply_toxicity_side_suppression(self, object proposal)
     cdef c_apply_budget_constraint(self, object proposal)
     cdef c_apply_order_optimization(self, object proposal)
     cdef c_apply_add_transaction_costs(self, object proposal)
